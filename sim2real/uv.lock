@@ -48,7 +48,7 @@ name = "cffi"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pycparser", marker = "implementation_name != 'PyPy'" },
+    { name = "pycparser" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz", hash = "sha256:44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529", size = 523588, upload-time = "2025-09-08T23:24:04.541Z" }
 wheels = [
@@ -466,6 +466,11 @@ dependencies = [
     { name = "sshkeyboard" },
 ]
 
+[package.optional-dependencies]
+vive = [
+    { name = "openvr" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "linuxfd" },
@@ -474,6 +479,7 @@ requires-dist = [
     { name = "mujoco" },
     { name = "numpy" },
     { name = "onnxruntime" },
+    { name = "openvr", marker = "extra == 'vive'", specifier = "==2.12.1401" },
     { name = "pin", specifier = ">=3.9.0" },
     { name = "pybind11", specifier = ">=3.0.3" },
     { name = "pyyaml" },
@@ -481,6 +487,7 @@ requires-dist = [
     { name = "scipy" },
     { name = "sshkeyboard" },
 ]
+provides-extras = ["vive"]
 
 [[package]]
 name = "h11"
@@ -844,6 +851,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/4d/a382452b17cf70a2313153c520ea4c96ab670c996cb3a95cc5d5ac7bfdac/onnxruntime-1.23.2-cp310-cp310-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:8f7d1fe034090a1e371b7f3ca9d3ccae2fabae8c1d8844fb7371d1ea38e8e8d2", size = 15219883, upload-time = "2025-10-22T03:46:21.66Z" },
     { url = "https://files.pythonhosted.org/packages/fb/56/179bf90679984c85b417664c26aae4f427cba7514bd2d65c43b181b7b08b/onnxruntime-1.23.2-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4ca88747e708e5c67337b0f65eed4b7d0dd70d22ac332038c9fc4635760018f7", size = 17370357, upload-time = "2025-10-22T03:46:57.968Z" },
     { url = "https://files.pythonhosted.org/packages/cd/6d/738e50c47c2fd285b1e6c8083f15dac1a5f6199213378a5f14092497296d/onnxruntime-1.23.2-cp310-cp310-win_amd64.whl", hash = "sha256:0be6a37a45e6719db5120e9986fcd30ea205ac8103fd1fb74b6c33348327a0cc", size = 13467651, upload-time = "2025-10-27T23:06:11.904Z" },
+]
+
+[[package]]
+name = "openvr"
+version = "2.12.1401"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/23/37/7217f40ba5525a6189827f8d9671d2ce326e578a6e5d958a8adb348ce603/openvr-2.12.1401.tar.gz", hash = "sha256:245afacb008b66f10bc38eab1f4806cf634a70400c4a0baf349295f617d0f6df", size = 1957770, upload-time = "2025-08-20T03:55:09.792Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/46/a2/e6cb89bd1803ffe70a25c20121ad8bb533fa1f1334ce7f0f7585d35e5096/openvr-2.12.1401-py3-none-any.whl", hash = "sha256:ef761cef3162843a8025a7812d5e244fd94ab3a992ca8f5ef0d1b0188ad56cb3", size = 1965222, upload-time = "2025-08-20T03:55:06.858Z" },
 ]
 
 [[package]]

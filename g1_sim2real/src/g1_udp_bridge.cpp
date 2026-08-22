@@ -300,6 +300,7 @@ struct LowLevelConfig {
   uint8_t mode_pr = 0;
   double damping_kd = 8.0;
   double wait_lowstate_timeout_s = 0.0;
+  double command_timeout_s = 0.0;
   bool release_motion_service = true;
   bool release_required = true;
   int release_max_attempts = 5;
@@ -359,6 +360,7 @@ BridgeConfig load_config(const std::string & path)
   cfg.low_level.mode_pr = static_cast<uint8_t>(yaml_value_or<int>(low["mode_pr"], 0));
   cfg.low_level.damping_kd = yaml_value_or<double>(low["damping_kd"], 8.0);
   cfg.low_level.wait_lowstate_timeout_s = yaml_value_or<double>(low["wait_lowstate_timeout_s"], 0.0);
+  cfg.low_level.command_timeout_s = yaml_value_or<double>(low["command_timeout_s"], 0.0);
   cfg.low_level.release_motion_service = yaml_value_or<bool>(low["release_motion_service"], true);
   cfg.low_level.release_required = yaml_value_or<bool>(low["release_required"], true);
   cfg.low_level.release_max_attempts = yaml_value_or<int>(low["release_max_attempts"], 5);
@@ -371,6 +373,9 @@ BridgeConfig load_config(const std::string & path)
   }
   if (cfg.low_level.wait_lowstate_timeout_s < 0.0) {
     throw std::runtime_error("low_level.wait_lowstate_timeout_s must be non-negative");
+  }
+  if (cfg.low_level.command_timeout_s < 0.0) {
+    throw std::runtime_error("low_level.command_timeout_s must be non-negative");
   }
   if (cfg.low_level.release_max_attempts < 1) {
     throw std::runtime_error("low_level.release_max_attempts must be positive");
@@ -899,6 +904,12 @@ class G1UdpBridge {
               << std::endl;
     std::cout << "[G1Bridge] command mode: event-driven UDP callback -> DDS Write, mode_pr="
               << static_cast<int>(cfg_.low_level.mode_pr) << std::endl;
+    if (cfg_.low_level.command_timeout_s > 0.0) {
+      std::cout << "[G1Bridge] command watchdog: " << cfg_.low_level.command_timeout_s
+                << " s, latched damping; bridge restart required after timeout" << std::endl;
+    } else {
+      std::cout << "[G1Bridge] command watchdog: disabled" << std::endl;
+    }
     if (cfg_.freq.state_publish_mode == StatePublishMode::LowStateTick) {
       std::cout << "[G1Bridge] state mode: LowState.tick target decimation -> dedicated UDP state sender thread"
                 << std::endl;
@@ -921,7 +932,8 @@ class G1UdpBridge {
   {
     auto next_log_time = SteadyClock::now() + std::chrono::seconds(1);
     while (!g_stop_requested.load()) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      check_command_watchdog();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
       const auto now = SteadyClock::now();
       if (now >= next_log_time) {
         log_rates();
@@ -1492,6 +1504,10 @@ class G1UdpBridge {
       std::cerr << "[G1Bridge] Ignore UDP command before mode_machine sync" << std::endl;
       return;
     }
+    if (command_watchdog_latched_.load(std::memory_order_acquire)) {
+      watchdog_rejected_command_count_.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
 
     try {
       const std::vector<double> q_src = read_array_as_double(packet.data, packet.payload, "q_des");
@@ -1531,7 +1547,13 @@ class G1UdpBridge {
 
       {
         std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+        if (command_watchdog_latched_.load(std::memory_order_relaxed)) {
+          watchdog_rejected_command_count_.fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
         lowcmd_publisher_->Write(cmd);
+        last_valid_command_time_ = SteadyClock::now();
+        have_valid_command_ = true;
       }
       record_policy_delay(yaml_u64_optional(packet.data["state_receive_time_ns"]));
       command_forward_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1562,6 +1584,12 @@ class G1UdpBridge {
     if (!lowcmd_publisher_) {
       return;
     }
+    std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+    publish_damping_command_locked();
+  }
+
+  void publish_damping_command_locked()
+  {
     LowCmd cmd;
     cmd.mode_pr() = cfg_.low_level.mode_pr;
     cmd.mode_machine() = mode_machine_.load();
@@ -1574,9 +1602,39 @@ class G1UdpBridge {
       motor_cmd.tau() = 0.0f;
     }
     cmd.crc() = crc32_core((uint32_t *)&cmd, (static_cast<uint32_t>(sizeof(LowCmd)) >> 2) - 1);
-    std::lock_guard<std::mutex> lock(cmd_write_mutex_);
     lowcmd_publisher_->Write(cmd);
     std::cout << "[G1Bridge] Damping command sent" << std::endl;
+  }
+
+  void check_command_watchdog()
+  {
+    if (cfg_.low_level.command_timeout_s <= 0.0 ||
+        command_watchdog_latched_.load(std::memory_order_acquire)) {
+      return;
+    }
+
+    bool tripped = false;
+    double elapsed_s = 0.0;
+    {
+      std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+      if (!have_valid_command_ ||
+          command_watchdog_latched_.load(std::memory_order_relaxed)) {
+        return;
+      }
+      elapsed_s =
+          std::chrono::duration<double>(SteadyClock::now() - last_valid_command_time_).count();
+      if (elapsed_s < cfg_.low_level.command_timeout_s) {
+        return;
+      }
+      command_watchdog_latched_.store(true, std::memory_order_release);
+      publish_damping_command_locked();
+      tripped = true;
+    }
+    if (tripped) {
+      watchdog_trip_count_.fetch_add(1, std::memory_order_relaxed);
+      std::cerr << "[G1Bridge] COMMAND WATCHDOG TIMEOUT after " << elapsed_s
+                << " s: damping latched; restart bridge to re-arm" << std::endl;
+    }
   }
 
   void log_rates()
@@ -1605,6 +1663,9 @@ class G1UdpBridge {
     const uint64_t timer_no_snapshot = timer_no_snapshot_count_.exchange(0, std::memory_order_relaxed);
     const uint64_t timer_skipped_reads = timer_skipped_read_count_.exchange(0, std::memory_order_relaxed);
     const uint64_t stdin_button_events = stdin_button_event_count_.exchange(0, std::memory_order_relaxed);
+    const uint64_t watchdog_trips = watchdog_trip_count_.exchange(0, std::memory_order_relaxed);
+    const uint64_t watchdog_rejected_commands =
+        watchdog_rejected_command_count_.exchange(0, std::memory_order_relaxed);
 
     uint64_t udp_rx_delta = 0;
     uint64_t udp_decoded_delta = 0;
@@ -1656,7 +1717,10 @@ class G1UdpBridge {
               << " tick_gap_events=" << tick_gap_events << " tick_missing=" << tick_missing
               << " tick_resets=" << tick_resets << " state_snapshot_overwrites=" << snapshot_overwrites
               << " state_snapshot_drops=" << snapshot_drops << " state_send_errors=" << state_send_errors
-              << " stdin_button_events=" << stdin_button_events;
+              << " stdin_button_events=" << stdin_button_events
+              << " watchdog_latched=" << command_watchdog_latched_.load(std::memory_order_relaxed)
+              << " watchdog_trips=" << watchdog_trips
+              << " watchdog_rejected_commands=" << watchdog_rejected_commands;
     if (cfg_.freq.state_publish_mode == StatePublishMode::Timer) {
       std::cout << " timer_missed_periods=" << timer_missed_periods
                 << " timer_no_snapshot=" << timer_no_snapshot
@@ -1691,6 +1755,9 @@ class G1UdpBridge {
   std::mutex first_state_mutex_;
   std::condition_variable first_state_cv_;
   std::mutex cmd_write_mutex_;
+  SteadyClock::time_point last_valid_command_time_{};
+  bool have_valid_command_ = false;
+  std::atomic<bool> command_watchdog_latched_{false};
   std::mutex lowstate_tick_mutex_;
   std::optional<uint32_t> last_lowstate_tick_;
   std::optional<uint32_t> next_state_tick_;
@@ -1723,6 +1790,8 @@ class G1UdpBridge {
   std::atomic<uint64_t> timer_no_snapshot_count_{0};
   std::atomic<uint64_t> timer_skipped_read_count_{0};
   std::atomic<uint64_t> stdin_button_event_count_{0};
+  std::atomic<uint64_t> watchdog_trip_count_{0};
+  std::atomic<uint64_t> watchdog_rejected_command_count_{0};
   std::atomic<int64_t> latest_cmd_seq_{-1};
 
   std::mutex policy_delay_mutex_;

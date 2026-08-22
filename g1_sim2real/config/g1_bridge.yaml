@@ -20,6 +20,9 @@ low_level:
   mode_pr: 0
   damping_kd: 8.0
   wait_lowstate_timeout_s: 0.0
+  # After the first valid command, a gap longer than this sends damping and
+  # permanently latches the bridge until it is restarted.
+  command_timeout_s: 0.20
   release_motion_service: true
   release_required: true
   release_max_attempts: 5

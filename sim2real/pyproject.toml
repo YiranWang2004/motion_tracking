@@ -19,6 +19,11 @@ dependencies = [
   "sshkeyboard",
 ]
 
+[project.optional-dependencies]
+vive = [
+  "openvr==2.12.1401",
+]
+
 [tool.uv]
 # This repo is script-oriented; only manage deps/env with uv.
 package = false

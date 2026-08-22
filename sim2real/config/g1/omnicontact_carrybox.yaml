@@ -1,0 +1,21 @@
+control_freq: 50
+asset_dir: "omnicontact"
+
+pose:
+  max_age_s: 0.10
+  min_confidence: 0.90
+  wait_timeout_s: 20.0
+
+safety:
+  prepare_seconds: 2.0
+  state_timeout_s: 1.0
+  max_target_delta: 0.15
+  damping_kd: 8.0
+
+policy:
+  reference_pad: 30
+  replan_position_error: 1.50
+  replan_goal_error: 0.20
+  replan_linear_speed: 0.05
+  replan_angular_speed: 0.05
+  replan_cooldown_ticks: 80
