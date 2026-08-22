@@ -9,6 +9,7 @@ from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
 from omnicontact.runtime import (
     BridgePoseProvider,
+    BridgeState,
     CommandLimiter,
     MotionBridgeClient,
     pose_pair_is_valid,
@@ -100,6 +101,8 @@ class TestOmniContactPolicy(unittest.TestCase):
         self.assertEqual(step.observation.shape, (1244,))
         self.assertEqual(step.command.target_pos.shape, (29,))
         self.assertTrue(np.all(np.isfinite(step.command.target_pos)))
+        self.assertEqual(step.visualization.left_wrist_wxyz.shape, (7,))
+        self.assertEqual(step.visualization.ghost_dof_pos.shape, (29,))
 
     def test_completed_reference_keeps_policy_balance_command(self):
         stamp = time.monotonic()
@@ -201,6 +204,60 @@ class TestOmniContactPolicy(unittest.TestCase):
         np.testing.assert_allclose(robot.position_w, [0, 0, 0.793])
         np.testing.assert_allclose(obj.position_w, [1, 0, 0.15])
         self.assertEqual(robot.stamp_s, obj.stamp_s)
+
+    def test_sim_command_contains_scene_and_reference_visualization(self):
+        class FakeTransport:
+            def __init__(self):
+                self.kwargs = None
+
+            def send_command(self, **kwargs):
+                self.kwargs = kwargs
+                return 7
+
+        stamp = time.monotonic()
+        robot = RobotPose([0, 0, 0.793], [0, 0, 0, 1], stamp)
+        obj = ObjectPose([1, 0, 0.15], [0, 0, 0, 1], [0.15, 0.15, 0.15], stamp)
+        goal = TaskGoal([1, 1, 0.15])
+        self.policy.initialize_reference(robot, obj, goal)
+        state = RobotPolicyState(
+            self.policy.default_lab,
+            np.zeros(29, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+        )
+        step = self.policy.compute(state, robot, obj)
+
+        client = MotionBridgeClient.__new__(MotionBridgeClient)
+        client.transport = FakeTransport()
+        client.pose_sink = BridgePoseProvider()
+        client._carrybox_scene = None
+        client.set_carrybox_scene(obj, goal)
+        bridge_state = BridgeState(
+            q_lab=self.policy.default_lab,
+            dq_lab=np.zeros(29, dtype=np.float32),
+            gyro=np.zeros(3, dtype=np.float32),
+            buttons={},
+            state_receive_time_ns=123,
+            packet_seq=1,
+            packet_arrival_ns=456,
+        )
+        client.send(
+            step.command,
+            enable=1,
+            state=bridge_state,
+            visualization=step.visualization,
+        )
+        visual = client.transport.kwargs["extra_command"]["omnicontact_visualization"]
+        np.testing.assert_allclose(
+            visual["scene"]["start_plane_wxyz"],
+            [1, 0, -0.01, 1, 0, 0, 0],
+            atol=1e-7,
+        )
+        np.testing.assert_allclose(
+            visual["scene"]["goal_plane_wxyz"],
+            [1, 1, -0.01, 1, 0, 0, 0],
+            atol=1e-7,
+        )
+        self.assertEqual(visual["reference"]["ghost_dof_pos"].shape, (29,))
 
 
 if __name__ == "__main__":

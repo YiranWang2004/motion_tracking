@@ -410,7 +410,12 @@ def _run_actuated(
 
         step = policy.compute(_policy_state(state), robot_pose, object_pose)
         safe_command = limiter.apply(step.command)
-        client.send(safe_command, enable=1, state=state)
+        client.send(
+            safe_command,
+            enable=1,
+            state=state,
+            visualization=step.visualization,
+        )
         policy.advance()
         if policy.should_replan(object_pose, goal):
             policy.request_replan(robot_pose, object_pose, goal)
@@ -528,6 +533,7 @@ def main() -> int:
             max_target_delta,
         )
         goal = TaskGoal(goal_position)
+        client.set_carrybox_scene(object_pose, goal)
 
         if not args.act:
             last_state = _run_no_actuation(

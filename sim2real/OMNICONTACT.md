@@ -89,6 +89,11 @@ option removes Python process scheduling jitter by pairing each policy command
 with one state frame; it does not bypass UDP or the deployment safety path. Do
 not run the real C++ bridge on UDP ports 55001/55002 at the same time.
 
+The simulation command also carries the original runner's visualization-only
+reference snapshot. The yellow wrist/torso/ankle markers, gray ghost robot,
+orange ghost box, red/green contact colors and start/goal planes therefore
+follow the same CFgen frame as the policy instead of remaining at XML defaults.
+
 `--max-target-delta 1.0` is a sim-only override for policy parity: the original
 OmniContact runner produces valid target changes up to about 0.96 rad per
 policy tick, while the real-deployment default remains the more conservative

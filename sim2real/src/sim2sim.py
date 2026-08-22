@@ -240,6 +240,8 @@ class Sim2Sim:
         self._have_command = False
         self._have_tracking_target = False
         self._buttons = {k: False for k in BUTTON_KEYS}
+        self._visualization_command: dict | None = None
+        self._init_omnicontact_visualization()
 
         self._cmd_lock = threading.Lock()
         self._cmd_condition = threading.Condition(self._cmd_lock)
@@ -277,6 +279,192 @@ class Sim2Sim:
     def _mujoco_to_policy(self, values: np.ndarray) -> np.ndarray:
         return self.policy_to_mujoco.map_state_to_from(values)
 
+    def _named_id(self, object_type, name: str) -> int:
+        return int(mujoco.mj_name2id(self.model, object_type, name))
+
+    def _mocap_id(self, body_name: str) -> int:
+        body_id = self._named_id(mujoco.mjtObj.mjOBJ_BODY, body_name)
+        if body_id < 0:
+            return -1
+        return int(self.model.body_mocapid[body_id])
+
+    def _joint_addresses(self, joint_name: str) -> tuple[int, int]:
+        joint_id = self._named_id(mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+        if joint_id < 0:
+            return -1, -1
+        return int(self.model.jnt_qposadr[joint_id]), int(self.model.jnt_dofadr[joint_id])
+
+    def _init_omnicontact_visualization(self) -> None:
+        self._visual_mocap_ids = {
+            "left_wrist_wxyz": self._mocap_id("ref_l_wrist_frame"),
+            "right_wrist_wxyz": self._mocap_id("ref_r_wrist_frame"),
+            "torso_wxyz": self._mocap_id("ref_torso_frame"),
+            "left_ankle_wxyz": self._mocap_id("ref_l_ankle_frame"),
+            "right_ankle_wxyz": self._mocap_id("ref_r_ankle_frame"),
+            "start_plane_wxyz": self._mocap_id("plane_1_holder"),
+            "goal_plane_wxyz": self._mocap_id("plane_2_holder"),
+        }
+        self._ghost_object_qpos_address, self._ghost_object_dof_address = (
+            self._joint_addresses("ghost_box_joint")
+        )
+        self._ghost_robot_qpos_address, self._ghost_robot_dof_address = (
+            self._joint_addresses("ghost_floating_base_joint")
+        )
+        self._ghost_robot_joint_qpos_addresses = np.array(
+            [
+                self._joint_addresses(f"ghost_{name}")[0]
+                for name in self.mujoco_joint_names
+            ],
+            dtype=np.int32,
+        )
+        self._contact_geom_ids = np.array(
+            [
+                self._named_id(mujoco.mjtObj.mjOBJ_GEOM, name)
+                for name in (
+                    "ref_l_ankle_mesh",
+                    "ref_r_ankle_mesh",
+                    "ref_l_rubber_hand",
+                    "ref_r_rubber_hand",
+                )
+            ],
+            dtype=np.int32,
+        )
+        self._contact_color_off = np.array([1.0, 1.0, 0.0, 0.7], dtype=np.float32)
+        self._contact_color_on = np.array([1.0, 0.0, 0.0, 0.7], dtype=np.float32)
+
+        # Reference and ghost bodies otherwise appear at their XML defaults
+        # before CFgen has produced a reference. Hide them until the first
+        # complete visualization snapshot arrives.
+        self._hidden_visual_geom_alpha: dict[int, float] = {}
+        for geom_id in range(self.model.ngeom):
+            body_id = int(self.model.geom_bodyid[geom_id])
+            body_name = mujoco.mj_id2name(
+                self.model, mujoco.mjtObj.mjOBJ_BODY, body_id
+            )
+            if body_name and (
+                body_name.startswith("ref_") or body_name.startswith("ghost_")
+            ):
+                self._hidden_visual_geom_alpha[geom_id] = float(
+                    self.model.geom_rgba[geom_id, 3]
+                )
+                self.model.geom_rgba[geom_id, 3] = 0.0
+        self._reference_visuals_visible = False
+
+    @staticmethod
+    def _visual_vector(data: dict, name: str, size: int) -> np.ndarray:
+        value = np.asarray(data[name], dtype=np.float64).reshape(size)
+        if not np.all(np.isfinite(value)):
+            raise ValueError(f"{name} contains non-finite values")
+        return value.copy()
+
+    def _parse_visualization_command(self, payload: dict) -> dict | None:
+        extra_command = payload.get("extra_command")
+        if not isinstance(extra_command, dict):
+            return None
+        raw = extra_command.get("omnicontact_visualization")
+        if not isinstance(raw, dict):
+            return None
+        parsed: dict[str, dict[str, np.ndarray]] = {}
+        scene = raw.get("scene")
+        if isinstance(scene, dict):
+            parsed["scene"] = {
+                name: self._visual_vector(scene, name, 7)
+                for name in ("start_plane_wxyz", "goal_plane_wxyz")
+            }
+        reference = raw.get("reference")
+        if isinstance(reference, dict):
+            result = {
+                name: self._visual_vector(reference, name, 7)
+                for name in (
+                    "left_wrist_wxyz",
+                    "right_wrist_wxyz",
+                    "torso_wxyz",
+                    "left_ankle_wxyz",
+                    "right_ankle_wxyz",
+                    "object_wxyz",
+                )
+            }
+            result["contact"] = self._visual_vector(reference, "contact", 4)
+            if "ghost_base_wxyz" in reference:
+                result["ghost_base_wxyz"] = self._visual_vector(
+                    reference, "ghost_base_wxyz", 7
+                )
+            if "ghost_dof_pos" in reference:
+                result["ghost_dof_pos"] = self._visual_vector(
+                    reference, "ghost_dof_pos", self.n_mujoco_joints
+                )
+            parsed["reference"] = result
+        return parsed or None
+
+    def _set_mocap_pose_locked(self, mocap_id: int, pose: np.ndarray) -> None:
+        if mocap_id < 0:
+            return
+        self.data.mocap_pos[mocap_id] = pose[:3]
+        self.data.mocap_quat[mocap_id] = pose[3:7]
+
+    def _set_freejoint_pose_locked(
+        self, qpos_address: int, dof_address: int, pose: np.ndarray
+    ) -> None:
+        if qpos_address < 0:
+            return
+        self.data.qpos[qpos_address : qpos_address + 7] = pose
+        if dof_address >= 0:
+            self.data.qvel[dof_address : dof_address + 6] = 0.0
+
+    def _apply_visualization_locked(self, visualization: dict | None) -> None:
+        if visualization is None:
+            return
+        scene = visualization.get("scene")
+        if scene is not None:
+            for name in ("start_plane_wxyz", "goal_plane_wxyz"):
+                self._set_mocap_pose_locked(self._visual_mocap_ids[name], scene[name])
+
+        reference = visualization.get("reference")
+        if reference is None:
+            return
+        if not self._reference_visuals_visible:
+            for geom_id, alpha in self._hidden_visual_geom_alpha.items():
+                self.model.geom_rgba[geom_id, 3] = alpha
+            self._reference_visuals_visible = True
+        for name in (
+            "left_wrist_wxyz",
+            "right_wrist_wxyz",
+            "torso_wxyz",
+            "left_ankle_wxyz",
+            "right_ankle_wxyz",
+        ):
+            self._set_mocap_pose_locked(self._visual_mocap_ids[name], reference[name])
+        self._set_freejoint_pose_locked(
+            self._ghost_object_qpos_address,
+            self._ghost_object_dof_address,
+            reference["object_wxyz"],
+        )
+        if "ghost_base_wxyz" in reference:
+            self._set_freejoint_pose_locked(
+                self._ghost_robot_qpos_address,
+                self._ghost_robot_dof_address,
+                reference["ghost_base_wxyz"],
+            )
+        if "ghost_dof_pos" in reference:
+            valid = self._ghost_robot_joint_qpos_addresses >= 0
+            self.data.qpos[self._ghost_robot_joint_qpos_addresses[valid]] = reference[
+                "ghost_dof_pos"
+            ][valid]
+        for geom_id, contact in zip(self._contact_geom_ids, reference["contact"]):
+            if geom_id >= 0:
+                self.model.geom_rgba[geom_id] = (
+                    self._contact_color_on
+                    if float(contact) >= 0.5
+                    else self._contact_color_off
+                )
+
+    def _refresh_visualization_only(self) -> None:
+        with self._cmd_lock:
+            visualization = self._visualization_command
+        with self._sim_lock:
+            self._apply_visualization_locked(visualization)
+            mujoco.mj_forward(self.model, self.data)
+
     def _set_button(self, name: str, value: bool) -> None:
         with self._button_lock:
             self._buttons[name] = value
@@ -311,10 +499,17 @@ class Sim2Sim:
         if q_des.size != self.n_policy_joints or kp.size != self.n_policy_joints or kd.size != self.n_policy_joints:
             print(f"{self.log_prefix} Ignore UDP command with unexpected DOF size")
             return
+        try:
+            visualization = self._parse_visualization_command(payload)
+        except (KeyError, TypeError, ValueError) as exc:
+            print(f"{self.log_prefix} Ignore malformed OmniContact visualization: {exc}")
+            visualization = None
         with self._cmd_condition:
             self._ptargets_policy[:] = q_des
             self._kp_policy[:] = kp
             self._kd_policy[:] = kd
+            if visualization is not None:
+                self._visualization_command = visualization
             command_state_time = payload.get("state_receive_time_ns")
             if command_state_time is not None:
                 self._last_command_state_time_ns = int(command_state_time)
@@ -454,6 +649,9 @@ class Sim2Sim:
         print("Waiting for high level controller...")
         state_timer = Timer(self.state_dt)
         while self.is_alive and not self._have_command:
+            self._refresh_visualization_only()
+            if not self._viewer_sync():
+                return
             self._publish_state()
             state_timer.sleep()
         print("Connected to high level")
@@ -462,6 +660,9 @@ class Sim2Sim:
         while self.is_alive and running_zero_cmd:
             buttons = self._buttons_snapshot()
             running_zero_cmd = not bool(buttons["start"])
+            self._refresh_visualization_only()
+            if not self._viewer_sync():
+                return
             self._publish_state()
             state_timer.sleep()
 
@@ -471,12 +672,14 @@ class Sim2Sim:
         while True:
             with self._cmd_lock:
                 ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
+                visualization = self._visualization_command
             with self._sim_lock:
                 self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_home
                 self.data.qvel[self.root_dof_address : self.root_dof_address + 6] = 0.0
                 self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
                 self.data.qvel[self.mujoco_dof_addresses] = 0.0
                 self.data.ctrl[:] = 0.0
+                self._apply_visualization_locked(visualization)
                 mujoco.mj_forward(self.model, self.data)
 
             if not self._viewer_sync():
@@ -515,8 +718,10 @@ class Sim2Sim:
                 ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
                 kp_mujoco = self._policy_to_mujoco(self._kp_policy)
                 kd_mujoco = self._policy_to_mujoco(self._kd_policy)
+                visualization = self._visualization_command
 
             with self._sim_lock:
+                self._apply_visualization_locked(visualization)
                 qpos = self.data.qpos[self.mujoco_qpos_addresses].copy()
                 qvel = self.data.qvel[self.mujoco_dof_addresses].copy()
                 if not self._have_tracking_target:

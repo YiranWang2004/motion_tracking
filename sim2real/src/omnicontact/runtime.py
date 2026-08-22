@@ -9,7 +9,13 @@ from typing import Any
 import numpy as np
 
 from common.udp_transport import UDPRobotHigh
-from omnicontact.contracts import ObjectPose, PDCommand, RobotPose
+from omnicontact.contracts import (
+    ObjectPose,
+    PDCommand,
+    ReferenceVisualization,
+    RobotPose,
+    TaskGoal,
+)
 from omnicontact.perception.object_pose import ExternalObjectPoseProvider
 
 
@@ -124,6 +130,7 @@ class MotionBridgeClient:
         self.skipped_packets = 0
         self._previous_buttons: dict[str, bool] | None = None
         self.button_rise: dict[str, bool] = {}
+        self._carrybox_scene: dict[str, np.ndarray] | None = None
 
     def close(self) -> None:
         self.transport.close()
@@ -208,14 +215,68 @@ class MotionBridgeClient:
             raise RuntimeError(f"simulation bridge returned malformed task poses: {exc}") from exc
         self.pose_sink.publish_pair(robot_pose, object_pose)
 
-    def send(self, command: PDCommand, *, enable: int, state: BridgeState) -> int:
+    def set_carrybox_scene(self, object_pose: ObjectPose, goal: TaskGoal) -> None:
+        """Configure sim-only start/goal planes using original runner semantics."""
+        if self.pose_sink is None:
+            return
+        plane_z_offset = float(object_pose.half_extents[2]) + 0.01
+        identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+        start_position = object_pose.position_w.copy()
+        start_position[2] -= plane_z_offset
+        goal_position = goal.position_w.copy()
+        goal_position[2] -= plane_z_offset
+        self._carrybox_scene = {
+            "start_plane_wxyz": np.concatenate((start_position, identity)),
+            "goal_plane_wxyz": np.concatenate((goal_position, identity)),
+        }
+
+    @staticmethod
+    def _reference_visualization_payload(
+        visualization: ReferenceVisualization,
+    ) -> dict[str, np.ndarray]:
+        payload = {
+            "left_wrist_wxyz": visualization.left_wrist_wxyz,
+            "right_wrist_wxyz": visualization.right_wrist_wxyz,
+            "torso_wxyz": visualization.torso_wxyz,
+            "left_ankle_wxyz": visualization.left_ankle_wxyz,
+            "right_ankle_wxyz": visualization.right_ankle_wxyz,
+            "object_wxyz": visualization.object_wxyz,
+            "contact": visualization.contact,
+        }
+        if visualization.ghost_base_wxyz is not None:
+            payload["ghost_base_wxyz"] = visualization.ghost_base_wxyz
+        if visualization.ghost_dof_pos is not None:
+            payload["ghost_dof_pos"] = visualization.ghost_dof_pos
+        return payload
+
+    def send(
+        self,
+        command: PDCommand,
+        *,
+        enable: int,
+        state: BridgeState,
+        visualization: ReferenceVisualization | None = None,
+    ) -> int:
         zeros = np.zeros(29, dtype=np.float32)
+        extra_command = None
+        if self.pose_sink is not None and (
+            self._carrybox_scene is not None or visualization is not None
+        ):
+            omni_visualization: dict[str, Any] = {}
+            if self._carrybox_scene is not None:
+                omni_visualization["scene"] = self._carrybox_scene
+            if visualization is not None:
+                omni_visualization["reference"] = self._reference_visualization_payload(
+                    visualization
+                )
+            extra_command = {"omnicontact_visualization": omni_visualization}
         return self.transport.send_command(
             q_des=command.target_pos,
             qd_des=zeros,
             kp=zeros if command.kp is None else command.kp,
             kd=zeros if command.kd is None else command.kd,
             enable=int(enable),
+            extra_command=extra_command,
             state_receive_time_ns=state.state_receive_time_ns,
         )
 

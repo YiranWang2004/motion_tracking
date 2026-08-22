@@ -17,7 +17,13 @@ import numpy as np
 import onnxruntime as ort
 import yaml
 
-from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
+from omnicontact.contracts import (
+    ObjectPose,
+    PDCommand,
+    ReferenceVisualization,
+    RobotPose,
+    TaskGoal,
+)
 from omnicontact.reference import CfGenCarryBox
 from omnicontact.reference.loco_primitives import KINEMATICS
 from omnicontact.reference.mujoco_kinematics_wxyz import MujocoKinematics
@@ -69,6 +75,7 @@ class PolicyStep:
     command: PDCommand
     observation: np.ndarray
     task_state: str
+    visualization: ReferenceVisualization
 
 
 class OmniContactCarryPolicy:
@@ -440,10 +447,49 @@ class OmniContactCarryPolicy:
             raise RuntimeError(f"invalid OmniContact action shape/values: {action.shape}")
         self.action_lab = action
         target_lab = action * self.action_scale_lab + self.default_lab
+        visualization = self.reference_visualization()
         return PolicyStep(
             command=PDCommand(target_lab, self.kp_lab, self.kd_lab),
             observation=observation,
             task_state="trajectory_complete" if self.done else "executing",
+            visualization=visualization,
+        )
+
+    def reference_visualization(self) -> ReferenceVisualization:
+        if self.reference is None:
+            raise RuntimeError("OmniContact reference is not initialized")
+        last = len(self.reference["ref_contact"]) - 1
+        index = min(self.frame, last)
+
+        def pose(position_key: str, quaternion_key: str) -> np.ndarray:
+            return np.concatenate(
+                (
+                    self.reference[position_key][index],
+                    self.reference[quaternion_key][index],
+                )
+            ).astype(np.float32)
+
+        ghost_base = None
+        ghost_dof = None
+        if "ref_base_pos" in self.reference and "ref_base_quat" in self.reference:
+            ghost_base = pose("ref_base_pos", "ref_base_quat")
+        if "dof_pos" in self.reference:
+            ghost_dof = np.asarray(self.reference["dof_pos"][index], dtype=np.float32)
+
+        return ReferenceVisualization(
+            left_wrist_wxyz=pose("ref_left_wrist_pos", "ref_left_wrist_quat"),
+            right_wrist_wxyz=pose("ref_right_wrist_pos", "ref_right_wrist_quat"),
+            torso_wxyz=pose("ref_torso_future_pos", "ref_torso_future_quat"),
+            left_ankle_wxyz=pose(
+                "ref_left_ankle_future_pos", "ref_left_ankle_future_quat"
+            ),
+            right_ankle_wxyz=pose(
+                "ref_right_ankle_future_pos", "ref_right_ankle_future_quat"
+            ),
+            object_wxyz=pose("ref_object_pos", "ref_object_quat"),
+            contact=self.reference["ref_contact"][index],
+            ghost_base_wxyz=ghost_base,
+            ghost_dof_pos=ghost_dof,
         )
 
     def advance(self) -> None:
