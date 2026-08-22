@@ -284,6 +284,8 @@ const char * state_publish_mode_name(StatePublishMode mode)
 struct UdpConfig {
   std::string state_host;
   int state_port = 0;
+  std::string state_mirror_host;
+  int state_mirror_port = 0;
   std::string cmd_bind_host;
   int cmd_port = 0;
   int recvbuf_bytes = 1 << 20;
@@ -331,12 +333,23 @@ BridgeConfig load_config(const std::string & path)
   const YAML::Node udp = raw["udp"];
   cfg.udp.state_host = yaml_required<std::string>(udp["state_host"], "udp.state_host");
   cfg.udp.state_port = yaml_required<int>(udp["state_port"], "udp.state_port");
+  cfg.udp.state_mirror_host = yaml_value_or<std::string>(udp["state_mirror_host"], "");
+  cfg.udp.state_mirror_port = yaml_value_or<int>(udp["state_mirror_port"], 0);
   cfg.udp.cmd_bind_host = yaml_required<std::string>(udp["cmd_bind_host"], "udp.cmd_bind_host");
   cfg.udp.cmd_port = yaml_required<int>(udp["cmd_port"], "udp.cmd_port");
   cfg.udp.recvbuf_bytes = yaml_value_or<int>(udp["recvbuf_bytes"], 1 << 20);
   cfg.udp.sndbuf_bytes = yaml_value_or<int>(udp["sndbuf_bytes"], 1 << 20);
   validate_udp_port(cfg.udp.state_port, "udp.state_port");
   validate_udp_port(cfg.udp.cmd_port, "udp.cmd_port");
+  const bool have_mirror_host = !cfg.udp.state_mirror_host.empty();
+  const bool have_mirror_port = cfg.udp.state_mirror_port != 0;
+  if (have_mirror_host != have_mirror_port) {
+    throw std::runtime_error(
+        "udp.state_mirror_host and udp.state_mirror_port must either both be set or both be omitted");
+  }
+  if (have_mirror_port) {
+    validate_udp_port(cfg.udp.state_mirror_port, "udp.state_mirror_port");
+  }
   if (cfg.udp.recvbuf_bytes < 0 || cfg.udp.sndbuf_bytes < 0) {
     throw std::runtime_error("udp recv/send buffer sizes must be non-negative");
   }
@@ -507,11 +520,7 @@ class UdpLatestSender {
     if (sndbuf_bytes > 0) {
       ::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf_bytes, sizeof(sndbuf_bytes));
     }
-    target_.sin_family = AF_INET;
-    target_.sin_port = htons(static_cast<uint16_t>(port));
-    if (::inet_pton(AF_INET, host.c_str(), &target_.sin_addr) != 1) {
-      throw std::runtime_error("Invalid UDP target host: " + host);
-    }
+    add_target(host, port);
   }
 
   ~UdpLatestSender()
@@ -521,6 +530,17 @@ class UdpLatestSender {
 
   UdpLatestSender(const UdpLatestSender &) = delete;
   UdpLatestSender & operator=(const UdpLatestSender &) = delete;
+
+  void add_target(const std::string & host, int port)
+  {
+    sockaddr_in target{};
+    target.sin_family = AF_INET;
+    target.sin_port = htons(static_cast<uint16_t>(port));
+    if (::inet_pton(AF_INET, host.c_str(), &target.sin_addr) != 1) {
+      throw std::runtime_error("Invalid UDP target host: " + host);
+    }
+    targets_.push_back(target);
+  }
 
   void close()
   {
@@ -565,16 +585,18 @@ class UdpLatestSender {
       seq = seq_++;
     }
     const std::vector<uint8_t> packet = encode_datagram(meta.str(), payload, seq);
-    const ssize_t sent =
-        ::sendto(fd_, packet.data(), packet.size(), 0, reinterpret_cast<const sockaddr *>(&target_), sizeof(target_));
-    if (sent < 0 || static_cast<size_t>(sent) != packet.size()) {
-      throw std::runtime_error(errno_text("sendto() failed"));
+    for (const sockaddr_in & target : targets_) {
+      const ssize_t sent = ::sendto(
+          fd_, packet.data(), packet.size(), 0, reinterpret_cast<const sockaddr *>(&target), sizeof(target));
+      if (sent < 0 || static_cast<size_t>(sent) != packet.size()) {
+        throw std::runtime_error(errno_text("sendto() failed"));
+      }
     }
   }
 
  private:
   int fd_ = -1;
-  sockaddr_in target_{};
+  std::vector<sockaddr_in> targets_;
   uint64_t seq_ = 0;
   std::mutex send_mutex_;
 };
@@ -869,6 +891,9 @@ class G1UdpBridge {
         policy_to_real_(build_source_indices(cfg_.real_joint_names, policy_index_, "policy_to_real map")),
         state_sender_(cfg_.udp.state_host, cfg_.udp.state_port, cfg_.udp.sndbuf_bytes)
   {
+    if (!cfg_.udp.state_mirror_host.empty()) {
+      state_sender_.add_target(cfg_.udp.state_mirror_host, cfg_.udp.state_mirror_port);
+    }
     if (cfg_.real_joint_names.size() != static_cast<size_t>(kG1MotorCount)) {
       std::cerr << "[G1Bridge] Warning: real_joint_names size=" << cfg_.real_joint_names.size()
                 << ", G1 examples use 29 motors" << std::endl;
@@ -897,6 +922,10 @@ class G1UdpBridge {
 
     std::cout << "[G1Bridge] endpoints: state=" << cfg_.udp.state_host << ":" << cfg_.udp.state_port
               << " cmd_bind=" << cfg_.udp.cmd_bind_host << ":" << cfg_.udp.cmd_port << std::endl;
+    if (!cfg_.udp.state_mirror_host.empty()) {
+      std::cout << "[G1Bridge] state mirror: " << cfg_.udp.state_mirror_host << ":"
+                << cfg_.udp.state_mirror_port << " (read-only viewer/recorder)" << std::endl;
+    }
     std::cout << "[G1Bridge] freq: physical_hz=" << cfg_.freq.physical_hz
               << " state_decimation=" << cfg_.freq.state_decimation
               << " state_publish_mode=" << state_publish_mode_name(cfg_.freq.state_publish_mode)

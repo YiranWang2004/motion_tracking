@@ -1,35 +1,43 @@
-lowcmd_topic: "rt/lowcmd"
-lowstate_topic: "rt/lowstate"
+render_gui: true
+# Exact OmniContact validation scene; the controller and UDP bridge simulator
+# still run entirely from motion_tracking.
+xml_path: "../../../../OmniContact_sim2sim/g1_description/omnicontact_carry_box.xml"
 
 udp:
   state_host: "127.0.0.1"
   state_port: 55001
-  # Read-only copy for the MuJoCo real-state viewer. It never receives commands.
-  state_mirror_host: "127.0.0.1"
-  state_mirror_port: 55003
   cmd_bind_host: "0.0.0.0"
   cmd_port: 55002
-  recvbuf_bytes: 1048576
-  sndbuf_bytes: 1048576
 
 freq:
-  physical_hz: 1000.0
-  state_decimation: 20
-  # lowstate_tick: forward on actual LowState.tick targets.
-  # timer: use a periodic 20 ms timer to actively read the latest LowState sample.
-  state_publish_mode: "timer"
+  # Match OmniContact's validated MuJoCo integration step (0.005 s) while
+  # preserving the real deployment's 50 Hz policy/state interface.
+  physical_hz: 200
+  state_decimation: 4
 
-low_level:
-  mode_pr: 0
-  damping_kd: 8.0
-  wait_lowstate_timeout_s: 0.0
-  # After the first valid command, a gap longer than this sends damping and
-  # permanently latches the bridge until it is restarted.
-  command_timeout_s: 0.20
-  release_motion_service: true
-  release_required: true
-  release_max_attempts: 5
-  release_sleep_s: 1.0
+viewer_fps: 50
+max_external_force: 30.0
+
+# Remove Python process scheduling jitter from sim2sim: after each 50 Hz state
+# packet, advance physics only after receiving the command computed from it.
+lockstep_policy: true
+lockstep_timeout_s: 1.0
+
+# G1 limits in policy/lab joint order. The OmniContact XML uses torque
+# actuators with ctrllimited="false", so its zero ctrlrange is not a zero-
+# torque range.
+torque_limits: [
+  88.0, 88.0, 88.0, 139.0, 139.0, 50.0,
+  88.0, 88.0, 50.0, 139.0, 139.0,
+  25.0, 25.0, 50.0, 50.0, 25.0, 25.0, 50.0, 50.0,
+  25.0, 25.0, 25.0, 25.0, 25.0, 25.0,
+  5.0, 5.0, 5.0, 5.0
+]
+
+task_object:
+  body_name: "box"
+  geom_name: "box_geom"
+  initial_position: [1.0, 0.0, 0.15]
 
 policy_joint_names: [
   "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
@@ -47,10 +55,22 @@ policy_joint_names: [
   "left_wrist_yaw_joint", "right_wrist_yaw_joint"
 ]
 
-real_joint_names: [
+mujoco_joint_names: [
   "left_hip_pitch_joint", "left_hip_roll_joint", "left_hip_yaw_joint", "left_knee_joint", "left_ankle_pitch_joint", "left_ankle_roll_joint",
   "right_hip_pitch_joint", "right_hip_roll_joint", "right_hip_yaw_joint", "right_knee_joint", "right_ankle_pitch_joint", "right_ankle_roll_joint",
   "waist_yaw_joint", "waist_roll_joint", "waist_pitch_joint",
   "left_shoulder_pitch_joint", "left_shoulder_roll_joint", "left_shoulder_yaw_joint", "left_elbow_joint", "left_wrist_roll_joint", "left_wrist_pitch_joint", "left_wrist_yaw_joint",
   "right_shoulder_pitch_joint", "right_shoulder_roll_joint", "right_shoulder_yaw_joint", "right_elbow_joint", "right_wrist_roll_joint", "right_wrist_pitch_joint", "right_wrist_yaw_joint"
 ]
+
+home_q: [
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+  0.0, 0.0
+]
+
+# The simulator is suspended during the default-pose transition, then placed
+# at the nominal G1 pelvis height when A starts physics/control.
+root_qpos_home: [0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]
+root_qpos_control: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]

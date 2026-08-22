@@ -10,6 +10,32 @@ import numpy as np
 
 from common.udp_transport import UDPRobotHigh
 from omnicontact.contracts import ObjectPose, PDCommand, RobotPose
+from omnicontact.perception.object_pose import ExternalObjectPoseProvider
+
+
+class BridgePoseProvider(ExternalObjectPoseProvider):
+    """Pose sink populated atomically from a simulation bridge state packet."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        import threading
+
+        self._ready = threading.Event()
+        self.error = None
+
+    def start(self) -> dict:
+        return {}
+
+    def stop(self) -> None:
+        self.clear()
+        self._ready.clear()
+
+    def wait_until_ready(self, timeout_s: float) -> bool:
+        return self._ready.wait(max(0.0, timeout_s))
+
+    def publish_pair(self, robot_pose: RobotPose, object_pose: ObjectPose) -> None:
+        super().publish_pair(robot_pose, object_pose)
+        self._ready.set()
 
 
 @dataclass(frozen=True)
@@ -86,8 +112,14 @@ class CommandLimiter:
 class MotionBridgeClient:
     """Thin checked client for the existing motion_tracking UDP bridge."""
 
-    def __init__(self, udp_config: Any) -> None:
+    def __init__(
+        self,
+        udp_config: Any,
+        *,
+        pose_sink: BridgePoseProvider | None = None,
+    ) -> None:
         self.transport = UDPRobotHigh(udp_config)
+        self.pose_sink = pose_sink
         self.last_seq: int | None = None
         self.skipped_packets = 0
         self._previous_buttons: dict[str, bool] | None = None
@@ -120,6 +152,8 @@ class MotionBridgeClient:
             or not np.all(np.isfinite(gyro))
         ):
             raise RuntimeError("bridge returned an invalid G1 state")
+        if self.pose_sink is not None:
+            self._publish_sim_pose(data)
         raw_buttons = data.get("buttons", {})
         buttons = {
             name: bool(raw_buttons.get(name, False))
@@ -143,6 +177,36 @@ class MotionBridgeClient:
             packet_seq=int(packet.seq),
             packet_arrival_ns=int(packet.recv_time_ns),
         )
+
+    def _publish_sim_pose(self, data: dict[str, Any]) -> None:
+        raw = data.get("sim_pose")
+        if not isinstance(raw, dict):
+            self.pose_sink.clear()
+            return
+        robot = raw.get("robot")
+        obj = raw.get("object")
+        if not isinstance(robot, dict) or not isinstance(obj, dict):
+            raise RuntimeError("simulation bridge returned an invalid sim_pose")
+        stamp = time.monotonic()
+        try:
+            robot_pose = RobotPose(
+                position_w=robot["position_w"],
+                quaternion_xyzw=robot["quaternion_xyzw"],
+                stamp_s=stamp,
+                confidence=1.0,
+            )
+            object_pose = ObjectPose(
+                position_w=obj["position_w"],
+                quaternion_xyzw=obj["quaternion_xyzw"],
+                half_extents=obj["half_extents"],
+                stamp_s=stamp,
+                confidence=1.0,
+                linear_velocity_w=obj.get("linear_velocity_w"),
+                angular_velocity_w=obj.get("angular_velocity_w"),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(f"simulation bridge returned malformed task poses: {exc}") from exc
+        self.pose_sink.publish_pair(robot_pose, object_pose)
 
     def send(self, command: PDCommand, *, enable: int, state: BridgeState) -> int:
         zeros = np.zeros(29, dtype=np.float32)

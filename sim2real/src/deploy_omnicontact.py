@@ -19,6 +19,7 @@ from omnicontact.perception.pose_udp import UdpPoseReceiverProvider
 from omnicontact.perception.vive_pose import ViveDeploymentConfig, VivePoseProvider
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
 from omnicontact.runtime import (
+    BridgePoseProvider,
     BridgeState,
     CommandLimiter,
     MotionBridgeClient,
@@ -65,8 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--robot", choices=("g1",), default="g1")
     parser.add_argument("--config", default="omnicontact_carrybox.yaml")
     parser.add_argument("--controller-config", default=None)
-    parser.add_argument("--vive-config", required=True)
-    parser.add_argument("--pose-source", choices=("local", "udp"), required=True)
+    parser.add_argument("--vive-config", default=None)
+    parser.add_argument("--pose-source", choices=("sim", "local", "udp"), required=True)
+    parser.add_argument(
+        "--goal-position",
+        type=float,
+        nargs=3,
+        default=(1.0, 1.0, 0.15),
+        metavar=("X", "Y", "Z"),
+        help="sim pose mode only: desired box-center position in the MuJoCo world",
+    )
     parser.add_argument("--vive-hz", type=float, default=100.0)
     parser.add_argument("--udp-bind", default="0.0.0.0")
     parser.add_argument("--udp-port", type=int, default=15150)
@@ -100,6 +109,8 @@ def validate_args(args: argparse.Namespace) -> None:
             "UDP pose mode requires --udp-token, OMNICONTACT_POSE_TOKEN, "
             "or ROBOJUDO_POSE_TOKEN"
         )
+    if args.pose_source != "sim" and not args.vive_config:
+        raise SystemExit("--vive-config is required for local and udp pose sources")
     for name in ("vive_hz", "run_seconds", "prepare_seconds", "max_target_delta", "pose_max_age"):
         value = getattr(args, name)
         if value is not None and value <= 0.0:
@@ -110,8 +121,11 @@ def validate_args(args: argparse.Namespace) -> None:
 
 def make_pose_provider(
     args: argparse.Namespace,
-    vive_config: ViveDeploymentConfig,
+    vive_config: ViveDeploymentConfig | None,
 ):
+    if args.pose_source == "sim":
+        return BridgePoseProvider()
+    assert vive_config is not None
     if args.pose_source == "local":
         return VivePoseProvider(vive_config, poll_hz=args.vive_hz)
     return UdpPoseReceiverProvider(
@@ -193,7 +207,11 @@ def _move_to_default(
             raise KeyboardInterrupt
         alpha = float(index + 1) / float(steps)
         target = start_q * (1.0 - alpha) + policy.default_lab * alpha
-        client.send(PDCommand(target, policy.kp_lab, policy.kd_lab), enable=1, state=state)
+        client.send(
+            PDCommand(target, policy.default_kp_lab, policy.default_kd_lab),
+            enable=1,
+            state=state,
+        )
     return state
 
 
@@ -226,7 +244,7 @@ def _plan_while_holding(
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
         client.send(
-            PDCommand(policy.default_lab, policy.kp_lab, policy.kd_lab),
+            PDCommand(policy.default_lab, policy.default_kp_lab, policy.default_kd_lab),
             enable=1,
             state=state,
         )
@@ -249,7 +267,7 @@ def _wait_for_task_start(
     min_pose_confidence: float,
     state_timeout_s: float,
 ) -> BridgeState:
-    LOGGER.warning("Hold default pose; press A with both Tracker poses fresh to start carry-box")
+    LOGGER.warning("Hold default pose; press A with fresh robot/object poses to start carry-box")
     last_pose_warning = 0.0
     while True:
         next_state = client.read_next(state_timeout_s)
@@ -257,7 +275,7 @@ def _wait_for_task_start(
             raise RuntimeError("lost G1 bridge state while waiting for A")
         state = next_state
         client.send(
-            PDCommand(policy.default_lab, policy.kp_lab, policy.kd_lab),
+            PDCommand(policy.default_lab, policy.default_kp_lab, policy.default_kd_lab),
             enable=1,
             state=state,
         )
@@ -273,7 +291,7 @@ def _wait_for_task_start(
         if not valid:
             now = time.monotonic()
             if now - last_pose_warning >= 1.0:
-                LOGGER.error("A ignored: robot/object Tracker pair is missing or stale")
+                LOGGER.error("A ignored: robot/object pose pair is missing or stale")
                 last_pose_warning = now
             continue
         return _plan_while_holding(
@@ -385,7 +403,7 @@ def _run_actuated(
             now = time.monotonic()
             if now - last_warning >= 1.0:
                 LOGGER.error(
-                    "Tracker pose missing/stale: reference frozen, holding measured joints"
+                    "Robot/object pose missing or stale: reference frozen, holding measured joints"
                 )
                 last_warning = now
             continue
@@ -459,16 +477,26 @@ def main() -> int:
         else args.max_target_delta
     )
 
-    vive_config = ViveDeploymentConfig.load(args.vive_config)
+    vive_config = (
+        None
+        if args.pose_source == "sim"
+        else ViveDeploymentConfig.load(args.vive_config)
+    )
     provider = make_pose_provider(args, vive_config)
     client: MotionBridgeClient | None = None
+    policy: OmniContactCarryPolicy | None = None
     last_state: BridgeState | None = None
     try:
         provider.start()
-        LOGGER.info("Waiting for a complete calibrated robot/object Tracker pair...")
+        client = MotionBridgeClient(
+            controller_config["udp"],
+            pose_sink=provider if isinstance(provider, BridgePoseProvider) else None,
+        )
+        last_state = _wait_for_bridge(client, wait_timeout_s)
+        LOGGER.info("Waiting for a complete robot/object pose pair...")
         if not provider.wait_until_ready(wait_timeout_s):
             raise RuntimeError(
-                f"no complete Tracker pair received within {wait_timeout_s:.1f}s"
+                f"no complete robot/object pose pair received within {wait_timeout_s:.1f}s"
             )
         robot_pose, object_pose, valid = _fresh_pair(
             provider,
@@ -476,12 +504,17 @@ def main() -> int:
             min_confidence=min_pose_confidence,
         )
         if not valid:
-            raise RuntimeError("initial Tracker pair is not fresh")
+            raise RuntimeError("initial robot/object pose pair is not fresh")
+        goal_position = (
+            np.asarray(args.goal_position, dtype=np.float32)
+            if vive_config is None
+            else vive_config.goal_position_w
+        )
         LOGGER.warning(
             "Pose sanity: pelvis=%s object=%s goal=%s",
             robot_pose.position_w,
             object_pose.position_w,
-            vive_config.goal_position_w,
+            goal_position,
         )
 
         policy = OmniContactCarryPolicy(
@@ -494,9 +527,7 @@ def main() -> int:
             policy.upper_lab,
             max_target_delta,
         )
-        goal = TaskGoal(vive_config.goal_position_w)
-        client = MotionBridgeClient(controller_config["udp"])
-        last_state = _wait_for_bridge(client, wait_timeout_s)
+        goal = TaskGoal(goal_position)
 
         if not args.act:
             last_state = _run_no_actuation(
@@ -565,6 +596,8 @@ def main() -> int:
         if client is not None:
             client.close()
         provider.stop()
+        if policy is not None:
+            policy.close()
     return 0
 
 

@@ -7,7 +7,12 @@ import yaml
 
 from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
-from omnicontact.runtime import CommandLimiter, pose_pair_is_valid
+from omnicontact.runtime import (
+    BridgePoseProvider,
+    CommandLimiter,
+    MotionBridgeClient,
+    pose_pair_is_valid,
+)
 from paths import SIM2REAL_ROOT
 
 
@@ -96,6 +101,28 @@ class TestOmniContactPolicy(unittest.TestCase):
         self.assertEqual(step.command.target_pos.shape, (29,))
         self.assertTrue(np.all(np.isfinite(step.command.target_pos)))
 
+    def test_completed_reference_keeps_policy_balance_command(self):
+        stamp = time.monotonic()
+        robot = RobotPose([0, 0, 0.793], [0, 0, 0, 1], stamp)
+        obj = ObjectPose(
+            [1, 0, 0.15],
+            [0, 0, 0, 1],
+            [0.15, 0.15, 0.15],
+            stamp,
+        )
+        self.policy.initialize_reference(robot, obj, TaskGoal([1, 1, 0.15]))
+        self.policy.frame = len(self.policy.reference["ref_contact"])
+        state = RobotPolicyState(
+            self.policy.default_lab,
+            np.zeros(29, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+        )
+        step = self.policy.compute(state, robot, obj)
+        self.assertEqual(step.task_state, "trajectory_complete")
+        self.assertEqual(step.observation.shape, (1244,))
+        self.assertTrue(np.all(np.isfinite(step.command.target_pos)))
+        self.assertFalse(self.policy.should_replan(obj, TaskGoal([3, 3, 0.15])))
+
     def test_command_limiter_clips_limits_and_delta(self):
         limiter = CommandLimiter(
             -np.ones(29, dtype=np.float32),
@@ -148,6 +175,32 @@ class TestOmniContactPolicy(unittest.TestCase):
                 now_s=stamp,
             )
         )
+
+    def test_sim_bridge_pose_is_published_as_one_pair(self):
+        provider = BridgePoseProvider()
+        client = MotionBridgeClient.__new__(MotionBridgeClient)
+        client.pose_sink = provider
+        client._publish_sim_pose(
+            {
+                "sim_pose": {
+                    "robot": {
+                        "position_w": [0, 0, 0.793],
+                        "quaternion_xyzw": [0, 0, 0, 1],
+                    },
+                    "object": {
+                        "position_w": [1, 0, 0.15],
+                        "quaternion_xyzw": [0, 0, 0, 1],
+                        "half_extents": [0.15, 0.15, 0.15],
+                        "linear_velocity_w": [0, 0, 0],
+                        "angular_velocity_w": [0, 0, 0],
+                    },
+                }
+            }
+        )
+        robot, obj = provider.get_poses()
+        np.testing.assert_allclose(robot.position_w, [0, 0, 0.793])
+        np.testing.assert_allclose(obj.position_w, [1, 0, 0.15])
+        self.assertEqual(robot.stamp_s, obj.stamp_s)
 
 
 if __name__ == "__main__":

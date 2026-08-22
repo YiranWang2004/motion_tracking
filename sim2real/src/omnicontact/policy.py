@@ -20,6 +20,7 @@ import yaml
 from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
 from omnicontact.reference import CfGenCarryBox
 from omnicontact.reference.loco_primitives import KINEMATICS
+from omnicontact.reference.mujoco_kinematics_wxyz import MujocoKinematics
 from omnicontact.reference.math_wxyz import (
     matrix_from_quat,
     quat_apply_batch,
@@ -147,12 +148,26 @@ class OmniContactCarryPolicy:
                 f"expected={expected_lab_names}\nactual={list(controller_joint_names)}"
             )
 
+        # CFgen uses its own module-level MuJoCo FK instance.  Keep policy FK
+        # separate so an asynchronous replan cannot mutate the same MjData
+        # while the control thread builds an observation (which can segfault
+        # inside MuJoCo rather than raising a Python exception).
+        self.kinematics = MujocoKinematics(
+            (self.asset_dir / "g1_29dof_fk.xml").as_posix()
+        )
+
         self.default_lab = np.asarray(model_cfg["default_angles_lab"], dtype=np.float32)
         self.action_scale_lab = np.asarray(model_cfg["action_scale_lab"], dtype=np.float32)
         self.kp_lab = np.asarray(model_cfg["kp_lab"], dtype=np.float32)
         self.kd_lab = np.asarray(model_cfg["kd_lab"], dtype=np.float32)
         self.lower_lab = np.asarray(model_cfg["joint_pos_lowerlimit_lab"], dtype=np.float32)
         self.upper_lab = np.asarray(model_cfg["joint_pos_upperlimit_lab"], dtype=np.float32)
+        with (self.asset_dir / "DefaultPose.yaml").open("r", encoding="utf-8") as stream:
+            default_pose_cfg = yaml.safe_load(stream)
+        default_kp_mj = np.asarray(default_pose_cfg["kps"], dtype=np.float32)
+        default_kd_mj = np.asarray(default_pose_cfg["kds"], dtype=np.float32)
+        self.default_kp_lab = default_kp_mj[self.mj2lab]
+        self.default_kd_lab = default_kd_mj[self.mj2lab]
         for name in (
             "default_lab",
             "action_scale_lab",
@@ -160,6 +175,8 @@ class OmniContactCarryPolicy:
             "kd_lab",
             "lower_lab",
             "upper_lab",
+            "default_kp_lab",
+            "default_kd_lab",
         ):
             value = getattr(self, name)
             if value.shape != (29,) or not np.all(np.isfinite(value)):
@@ -202,6 +219,12 @@ class OmniContactCarryPolicy:
         self.frame = 0
         self.done = False
         self.replan_cooldown = 0
+
+    def close(self) -> None:
+        """Wait for a CFgen worker before its MuJoCo objects are torn down."""
+        worker = self._replan_thread
+        if worker is not None and worker.is_alive():
+            worker.join()
 
     def _make_reference(
         self,
@@ -281,7 +304,7 @@ class OmniContactCarryPolicy:
         return True
 
     def _fk(self, state: RobotPolicyState, robot_pose: RobotPose):
-        return KINEMATICS.forward(
+        return self.kinematics.forward(
             self.q_lab_to_mj(state.q_lab),
             robot_pose.position_w,
             _xyzw_to_wxyz(robot_pose.quaternion_xyzw),
@@ -407,11 +430,6 @@ class OmniContactCarryPolicy:
             raise RuntimeError("initialize_reference must be called before compute")
         if self.frame >= len(self.reference["ref_contact"]):
             self.done = True
-            return PolicyStep(
-                command=PDCommand(state.q_lab, self.kp_lab, self.kd_lab),
-                observation=np.zeros(1244, dtype=np.float32),
-                task_state="trajectory_complete",
-            )
         observation = self.build_observation(state, robot_pose, object_pose)
         inputs = {
             self.obs_input_name: observation[None, :],
@@ -425,7 +443,7 @@ class OmniContactCarryPolicy:
         return PolicyStep(
             command=PDCommand(target_lab, self.kp_lab, self.kd_lab),
             observation=observation,
-            task_state="executing",
+            task_state="trajectory_complete" if self.done else "executing",
         )
 
     def advance(self) -> None:
@@ -433,7 +451,10 @@ class OmniContactCarryPolicy:
             self.frame += 1
 
     def should_replan(self, object_pose: ObjectPose, goal: TaskGoal) -> bool:
-        if self.reference is None:
+        # carrybox-only deployment performs one reference and then holds its
+        # final policy frame.  Retrying the entire carry after completion can
+        # unexpectedly start a second motion while the operator expects hold.
+        if self.reference is None or self.done:
             return False
         if self.replan_cooldown > 0:
             self.replan_cooldown -= 1
@@ -458,11 +479,7 @@ class OmniContactCarryPolicy:
             > self.replan_position_error
         ):
             return True
-        return (
-            self.done
-            and float(np.linalg.norm(goal.position_w - object_pose.position_w))
-            > self.replan_goal_error
-        )
+        return False
 
     def request_replan(
         self,

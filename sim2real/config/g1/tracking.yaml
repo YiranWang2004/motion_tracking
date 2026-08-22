@@ -39,6 +39,11 @@ motions:
     path: "motions/walk3_subject1.npz"
     start: 0
     end: -1
+  - name: "walk1_subject1_first3s"
+    path: "motions/walk1_subject1_first3s.npz"
+    start: 0
+    end: 150
+
   ## test extreme motion in sim before real deployment
   # - name: "omni_extreme_1"
   #   path: "motions/omni_extreme/omni_extreme_1.npz"

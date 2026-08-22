@@ -108,8 +108,56 @@ class Sim2Sim:
         if mapping_info["unmapped_to_joints"]:
             raise ValueError(f"Unmapped MuJoCo joints: {mapping_info['unmapped_to_joints']}")
 
-        self.ctrl_lower = self.model.actuator_ctrlrange[:, 0]
-        self.ctrl_upper = self.model.actuator_ctrlrange[:, 1]
+        self.mujoco_qpos_addresses = np.empty(self.n_mujoco_joints, dtype=np.int32)
+        self.mujoco_dof_addresses = np.empty(self.n_mujoco_joints, dtype=np.int32)
+        for index, name in enumerate(self.mujoco_joint_names):
+            joint_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+            if joint_id < 0:
+                raise ValueError(f"MuJoCo model is missing configured joint {name!r}")
+            if self.model.jnt_type[joint_id] not in (
+                mujoco.mjtJoint.mjJNT_HINGE,
+                mujoco.mjtJoint.mjJNT_SLIDE,
+            ):
+                raise ValueError(f"Configured robot joint {name!r} is not 1-DoF")
+            self.mujoco_qpos_addresses[index] = int(self.model.jnt_qposadr[joint_id])
+            self.mujoco_dof_addresses[index] = int(self.model.jnt_dofadr[joint_id])
+
+        free_joint_ids = [
+            joint_id
+            for joint_id in range(self.model.njnt)
+            if self.model.jnt_type[joint_id] == mujoco.mjtJoint.mjJNT_FREE
+        ]
+        if not free_joint_ids:
+            raise ValueError("MuJoCo model must have a floating-base free joint")
+        self.root_joint_id = free_joint_ids[0]
+        self.root_qpos_address = int(self.model.jnt_qposadr[self.root_joint_id])
+        self.root_dof_address = int(self.model.jnt_dofadr[self.root_joint_id])
+
+        # MuJoCo leaves ctrlrange at [0, 0] for an actuator with
+        # ctrllimited="false".  That means unbounded, not zero torque.
+        ctrl_limited = np.asarray(self.model.actuator_ctrllimited, dtype=bool)
+        self.ctrl_lower = np.where(
+            ctrl_limited,
+            self.model.actuator_ctrlrange[:, 0],
+            -np.inf,
+        )
+        self.ctrl_upper = np.where(
+            ctrl_limited,
+            self.model.actuator_ctrlrange[:, 1],
+            np.inf,
+        )
+        torque_limits_cfg = _cfg_value(config, "torque_limits", "torque_limits", None)
+        if torque_limits_cfg is not None:
+            torque_limits_policy = _as_vector(
+                torque_limits_cfg,
+                name="torque_limits",
+                size=self.n_policy_joints,
+            )
+            if not np.all(np.isfinite(torque_limits_policy)) or np.any(torque_limits_policy <= 0.0):
+                raise ValueError("torque_limits must contain finite positive values")
+            torque_limits_mujoco = self._policy_to_mujoco(torque_limits_policy)
+            self.ctrl_lower = np.maximum(self.ctrl_lower, -torque_limits_mujoco)
+            self.ctrl_upper = np.minimum(self.ctrl_upper, torque_limits_mujoco)
 
         self.home_q_policy = _as_vector(
             _cfg_value(config, "home_q", "home_q"),
@@ -128,9 +176,61 @@ class Sim2Sim:
         )
         self.viewer_fps = int(_cfg_value(config, "viewer_fps", "viewer_fps", 10))
         self.max_external_force = float(_cfg_value(config, "max_external_force", "max_external_force", 30.0))
+        self.lockstep_policy = bool(
+            _cfg_value(config, "lockstep_policy", "lockstep_policy", False)
+        )
+        self.lockstep_timeout_s = float(
+            _cfg_value(config, "lockstep_timeout_s", "lockstep_timeout_s", 1.0)
+        )
+        if self.lockstep_timeout_s <= 0.0:
+            raise ValueError("lockstep_timeout_s must be positive")
 
-        self.data.qpos[:7] = self.root_qpos_home
-        self.data.qpos[7:] = self._policy_to_mujoco(self.home_q_policy)
+        self.task_object_body_id: int | None = None
+        self.task_object_qpos_address: int | None = None
+        self.task_object_dof_address: int | None = None
+        self.task_object_half_extents: np.ndarray | None = None
+        self.task_object_initial_position: np.ndarray | None = None
+        task_object_cfg = _cfg_value(config, "task_object", "task_object", None)
+        if task_object_cfg is not None:
+            body_name = str(_cfg_value(task_object_cfg, "body_name", "task_object.body_name"))
+            geom_name = str(_cfg_value(task_object_cfg, "geom_name", "task_object.geom_name"))
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+            geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            if body_id < 0 or geom_id < 0:
+                raise ValueError(
+                    f"task object body/geom not found: body={body_name!r}, geom={geom_name!r}"
+                )
+            object_joint_id = int(self.model.body_jntadr[body_id])
+            if object_joint_id < 0 or self.model.jnt_type[object_joint_id] != mujoco.mjtJoint.mjJNT_FREE:
+                raise ValueError("task object body must be attached through a free joint")
+            self.task_object_body_id = body_id
+            self.task_object_qpos_address = int(self.model.jnt_qposadr[object_joint_id])
+            self.task_object_dof_address = int(self.model.jnt_dofadr[object_joint_id])
+            self.task_object_half_extents = self.model.geom_size[geom_id, :3].copy().astype(np.float32)
+            initial_position = _cfg_value(
+                task_object_cfg,
+                "initial_position",
+                "task_object.initial_position",
+                None,
+            )
+            if initial_position is not None:
+                self.task_object_initial_position = _as_vector(
+                    initial_position,
+                    name="task_object.initial_position",
+                    size=3,
+                )
+            print(
+                f"{self.log_prefix} task object: body={body_name}, geom={geom_name}, "
+                f"half_extents={self.task_object_half_extents.tolist()}"
+            )
+
+        self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_home
+        self.data.qpos[self.mujoco_qpos_addresses] = self._policy_to_mujoco(self.home_q_policy)
+        if self.task_object_initial_position is not None:
+            assert self.task_object_qpos_address is not None
+            self.data.qpos[
+                self.task_object_qpos_address : self.task_object_qpos_address + 3
+            ] = self.task_object_initial_position
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
@@ -142,6 +242,8 @@ class Sim2Sim:
         self._buttons = {k: False for k in BUTTON_KEYS}
 
         self._cmd_lock = threading.Lock()
+        self._cmd_condition = threading.Condition(self._cmd_lock)
+        self._last_command_state_time_ns: int | None = None
         self._button_lock = threading.Lock()
         self._sim_lock = threading.Lock()
         self._policy_delay_lock = threading.Lock()
@@ -160,7 +262,7 @@ class Sim2Sim:
         self.is_alive = True
         self.policy_queried = False
 
-        self.render_gui = bool(config.render_gui)
+        self.render_gui = bool(config.render_gui) and not bool(args.headless)
         self.viewer = None
         self._viewer_tick = 0
         self._physics_tick = 0
@@ -209,10 +311,14 @@ class Sim2Sim:
         if q_des.size != self.n_policy_joints or kp.size != self.n_policy_joints or kd.size != self.n_policy_joints:
             print(f"{self.log_prefix} Ignore UDP command with unexpected DOF size")
             return
-        with self._cmd_lock:
+        with self._cmd_condition:
             self._ptargets_policy[:] = q_des
             self._kp_policy[:] = kp
             self._kd_policy[:] = kd
+            command_state_time = payload.get("state_receive_time_ns")
+            if command_state_time is not None:
+                self._last_command_state_time_ns = int(command_state_time)
+            self._cmd_condition.notify_all()
         self._record_policy_delay(payload)
         self.policy_queried |= bool(enable)
         self._have_command = True
@@ -258,13 +364,22 @@ class Sim2Sim:
             return np.zeros(3, dtype=np.float32)
         return self.data.sensordata[self.imu_lin_acc_adr : self.imu_lin_acc_adr + 3].copy().astype(np.float32)
 
-    def _publish_state(self):
+    def _publish_state(self) -> int:
         with self._sim_lock:
-            q = self._mujoco_to_policy(self.data.qpos[7:]).astype(np.float32)
-            dq = self._mujoco_to_policy(self.data.qvel[6:]).astype(np.float32)
-            quat = self.data.qpos[3:7].copy().astype(np.float32)
-            gyro = self.data.qvel[3:6].copy().astype(np.float32)
+            q_mujoco = self.data.qpos[self.mujoco_qpos_addresses].copy()
+            dq_mujoco = self.data.qvel[self.mujoco_dof_addresses].copy()
+            q = self._mujoco_to_policy(q_mujoco).astype(np.float32)
+            dq = self._mujoco_to_policy(dq_mujoco).astype(np.float32)
+            root_qpos = self.data.qpos[
+                self.root_qpos_address : self.root_qpos_address + 7
+            ].copy()
+            quat = root_qpos[3:7].astype(np.float32)
+            gyro = self.data.qvel[
+                self.root_dof_address + 3 : self.root_dof_address + 6
+            ].copy().astype(np.float32)
             linacc = self._linacc()
+            extra_state = self._task_pose_payload(root_qpos)
+        state_time_ns = time.perf_counter_ns()
         self.transport.send_state(
             q=q,
             dq=dq,
@@ -273,12 +388,67 @@ class Sim2Sim:
             linacc=linacc,
             buttons=self._buttons_snapshot(),
             sticks={name: 0.0 for name in STICK_KEYS},
+            extra_state=extra_state,
+            state_receive_time_ns=state_time_ns,
         )
+        return state_time_ns
+
+    @staticmethod
+    def _wxyz_to_xyzw(quaternion: np.ndarray) -> np.ndarray:
+        quat = np.asarray(quaternion, dtype=np.float32).reshape(4)
+        return quat[[1, 2, 3, 0]]
+
+    def _task_pose_payload(self, root_qpos: np.ndarray) -> dict | None:
+        if self.task_object_body_id is None:
+            return None
+        assert self.task_object_dof_address is not None
+        assert self.task_object_half_extents is not None
+        object_qvel = self.data.qvel[
+            self.task_object_dof_address : self.task_object_dof_address + 6
+        ].copy()
+        return {
+            "sim_pose": {
+                "robot": {
+                    "position_w": root_qpos[:3].astype(np.float32),
+                    "quaternion_xyzw": self._wxyz_to_xyzw(root_qpos[3:7]),
+                },
+                "object": {
+                    "position_w": self.data.xpos[self.task_object_body_id].copy().astype(np.float32),
+                    "quaternion_xyzw": self._wxyz_to_xyzw(
+                        self.data.xquat[self.task_object_body_id]
+                    ),
+                    "half_extents": self.task_object_half_extents.copy(),
+                    "linear_velocity_w": object_qvel[:3].astype(np.float32),
+                    "angular_velocity_w": object_qvel[3:6].astype(np.float32),
+                },
+            }
+        }
 
     def _publish_state_if_due(self):
         self._physics_tick += 1
         if (self._physics_tick % self.state_decimation) == 0:
-            self._publish_state()
+            return self._publish_state()
+        return None
+
+    def _wait_for_policy_command(self, state_time_ns: int | None) -> None:
+        if not self.lockstep_policy or state_time_ns is None:
+            return
+        deadline = time.monotonic() + self.lockstep_timeout_s
+        with self._cmd_condition:
+            while (
+                self.is_alive
+                and (
+                    self._last_command_state_time_ns is None
+                    or self._last_command_state_time_ns < state_time_ns
+                )
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise RuntimeError(
+                        "timed out waiting for the policy command corresponding "
+                        "to the latest simulation state"
+                    )
+                self._cmd_condition.wait(remaining)
 
     def wait_for_high_cmd(self):
         print("Waiting for high level controller...")
@@ -302,17 +472,18 @@ class Sim2Sim:
             with self._cmd_lock:
                 ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
             with self._sim_lock:
-                self.data.qpos[:7] = self.root_qpos_home
-                self.data.qvel[:6] = 0.0
-                self.data.qpos[7:] = ptargets_mujoco
-                self.data.qvel[6:] = 0.0
+                self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_home
+                self.data.qvel[self.root_dof_address : self.root_dof_address + 6] = 0.0
+                self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
+                self.data.qvel[self.mujoco_dof_addresses] = 0.0
                 self.data.ctrl[:] = 0.0
                 mujoco.mj_forward(self.model, self.data)
 
             if not self._viewer_sync():
                 break
 
-            self._publish_state_if_due()
+            state_time_ns = self._publish_state_if_due()
+            self._wait_for_policy_command(state_time_ns)
 
             buttons = self._buttons_snapshot()
             running_default_pos = not (bool(buttons["A"]) or bool(buttons["stop"]))
@@ -323,7 +494,7 @@ class Sim2Sim:
     def simulate_control(self):
         print("Running control loop...")
         with self._sim_lock:
-            self.data.qpos[:7] = self.root_qpos_control
+            self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_control
             mujoco.mj_forward(self.model, self.data)
 
         timer = Timer(self.low_level_dt)
@@ -346,17 +517,21 @@ class Sim2Sim:
                 kd_mujoco = self._policy_to_mujoco(self._kd_policy)
 
             with self._sim_lock:
-                qpos = self.data.qpos[7:]
-                qvel = self.data.qvel[6:]
+                qpos = self.data.qpos[self.mujoco_qpos_addresses].copy()
+                qvel = self.data.qvel[self.mujoco_dof_addresses].copy()
                 if not self._have_tracking_target:
                     delta = ptargets_mujoco - qpos
                     if float(np.linalg.norm(delta)) > 1e-4:
                         self._have_tracking_target = True
                 if not self._have_tracking_target:
-                    self.data.qpos[:7] = self.root_qpos_control
-                    self.data.qvel[:6] = 0.0
-                    self.data.qpos[7:] = ptargets_mujoco
-                    self.data.qvel[6:] = 0.0
+                    self.data.qpos[
+                        self.root_qpos_address : self.root_qpos_address + 7
+                    ] = self.root_qpos_control
+                    self.data.qvel[
+                        self.root_dof_address : self.root_dof_address + 6
+                    ] = 0.0
+                    self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
+                    self.data.qvel[self.mujoco_dof_addresses] = 0.0
                     self.data.ctrl[:] = 0.0
                     mujoco.mj_forward(self.model, self.data)
                 else:
@@ -369,14 +544,22 @@ class Sim2Sim:
             if not self._viewer_sync():
                 break
 
-            self._publish_state_if_due()
+            state_time_ns = self._publish_state_if_due()
+            self._wait_for_policy_command(state_time_ns)
+
+            if self._buttons_snapshot()["stop"]:
+                # Publish the stop edge once even when it falls between normal
+                # state ticks, so the policy side can send its damping command.
+                self._publish_state()
+                timer.sleep()
+                break
 
             now = time.time()
             if now - last_log_time >= 1.0:
                 seconds = loop_count * self.low_level_dt
                 seconds_real = now - time_start
                 with self._sim_lock:
-                    root_z = float(self.data.qpos[2])
+                    root_z = float(self.data.qpos[self.root_qpos_address + 2])
                 delay_stats = self._consume_policy_delay_stats()
                 if delay_stats is None:
                     delay_text = "policy_delay_ms=n/a"
@@ -468,6 +651,7 @@ def main(argv=None):
     parser.add_argument("--robot", choices=list(SUPPORTED_ROBOTS), default="g1")
     parser.add_argument("--xml_path", type=str, default=None)
     parser.add_argument("--bridge-config", type=str, default=None)
+    parser.add_argument("--headless", action="store_true")
     args = parser.parse_args(argv)
 
     config_path = args.bridge_config or str(bridge_config_path(args.robot))

@@ -39,6 +39,64 @@ The policy, its original YAML and an FK-only derivative of the original G1 XML
 are stored in `config/g1/omnicontact/`. Visual mesh geoms were removed from the
 FK XML; the joint/body transform tree is unchanged.
 
+## Run motion_tracking sim2sim
+
+This mode runs the same `deploy_omnicontact.py`, policy adapter, safety limiter,
+50 Hz state loop and UDP command path used for the robot.  Only the low-level
+side is replaced: `sim2sim.py` acts as the C++/DDS bridge and advances the
+original OmniContact carry-box MuJoCo scene.
+
+Open terminal 1:
+
+```bash
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+uv run src/sim2sim.py \
+  --robot g1 \
+  --bridge-config config/g1/bridge_omnicontact.yaml
+```
+
+Use `--headless` only when no MuJoCo window is wanted.
+
+Open terminal 2:
+
+```bash
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+uv run src/deploy_omnicontact.py \
+  --robot g1 \
+  --pose-source sim \
+  --goal-position 1.0 1.0 0.15 \
+  --max-target-delta 1.0 \
+  --act \
+  --confirm-actuation ENABLE_MOTORS
+```
+
+Then operate in this order:
+
+1. Wait for terminal 2 to print `ZERO TORQUE`.
+2. In terminal 1 press `s`; the virtual robot is moved through the same
+   default-pose preparation state as real deployment.
+3. Wait for terminal 2 to print `Hold default pose`.
+4. In terminal 1 press `a`; CFgen creates the carry-box reference and policy
+   control starts. A visible crouch during grasping and placing is expected.
+5. In terminal 1 press `x` to request Stop/damping. Use `Ctrl+C` as the final
+   process stop if needed.
+
+The simulator publishes robot pelvis and box poses in the same state packet as
+joint/IMU data, so `--pose-source sim` does not use Vive. The checked config
+sets the box center to `[1, 0, 0.15]`, the goal to the command-line value, the
+physics loop to 200 Hz, and the deployment interface to 50 Hz. Its lockstep
+option removes Python process scheduling jitter by pairing each policy command
+with one state frame; it does not bypass UDP or the deployment safety path. Do
+not run the real C++ bridge on UDP ports 55001/55002 at the same time.
+
+`--max-target-delta 1.0` is a sim-only override for policy parity: the original
+OmniContact runner produces valid target changes up to about 0.96 rad per
+policy tick, while the real-deployment default remains the more conservative
+0.15 rad. Omitting the override is useful for testing that stricter real safety
+setting, but it materially changes the trained closed loop and may fail the
+carry in simulation. Joint-position and torque limits remain active in both
+modes.
+
 ## Calibrate Vive
 
 List Trackers:

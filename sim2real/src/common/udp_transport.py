@@ -82,9 +82,10 @@ def _state_payload(
     linacc: np.ndarray,
     buttons: dict[str, bool],
     sticks: dict[str, float],
+    extra_state: dict[str, Any] | None = None,
     state_receive_time_ns: int | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "q": np.asarray(q, dtype=np.float32),
         "dq": np.asarray(dq, dtype=np.float32),
         "quat_wxyz": np.asarray(quat_wxyz, dtype=np.float32),
@@ -94,6 +95,12 @@ def _state_payload(
         "sticks": sticks,
         "state_receive_time_ns": int(time.perf_counter_ns() if state_receive_time_ns is None else state_receive_time_ns),
     }
+    if extra_state is not None:
+        overlap = payload.keys() & extra_state.keys()
+        if overlap:
+            raise ValueError(f"extra_state cannot replace standard fields: {sorted(overlap)}")
+        payload.update(extra_state)
+    return payload
 
 
 class UDPRobotHigh:
@@ -180,6 +187,7 @@ class UDPRobotLow:
         linacc: np.ndarray,
         buttons: dict[str, bool],
         sticks: dict[str, float],
+        extra_state: dict[str, Any] | None = None,
         state_receive_time_ns: int | None = None,
     ) -> int:
         return self.state_sender.send(
@@ -191,6 +199,7 @@ class UDPRobotLow:
                 linacc=linacc,
                 buttons=buttons,
                 sticks=sticks,
+                extra_state=extra_state,
                 state_receive_time_ns=state_receive_time_ns,
             )
         )
