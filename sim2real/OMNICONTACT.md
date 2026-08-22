@@ -37,7 +37,10 @@ uv sync --extra vive
 
 The policy, its original YAML and an FK-only derivative of the original G1 XML
 are stored in `config/g1/omnicontact/`. Visual mesh geoms were removed from the
-FK XML; the joint/body transform tree is unchanged.
+FK XML; the joint/body transform tree is unchanged. The exact carry-box
+sim2sim scene, its robot/ghost XML includes and all referenced meshes are
+vendored under `config/g1/assets/`; no sibling `OmniContact_sim2sim` checkout is
+required.
 
 ## Run motion_tracking sim2sim
 
@@ -49,7 +52,7 @@ original OmniContact carry-box MuJoCo scene.
 Open terminal 1:
 
 ```bash
-cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+cd <repo>/sim2real
 uv run src/sim2sim.py \
   --robot g1 \
   --bridge-config config/g1/bridge_omnicontact.yaml
@@ -60,7 +63,7 @@ Use `--headless` only when no MuJoCo window is wanted.
 Open terminal 2:
 
 ```bash
-cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+cd <repo>/sim2real
 uv run src/deploy_omnicontact.py \
   --robot g1 \
   --pose-source sim \

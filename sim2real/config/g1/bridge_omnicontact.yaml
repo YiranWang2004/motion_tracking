@@ -1,7 +1,7 @@
 render_gui: true
-# Exact OmniContact validation scene; the controller and UDP bridge simulator
-# still run entirely from motion_tracking.
-xml_path: "../../../../OmniContact_sim2sim/g1_description/omnicontact_carry_box.xml"
+# Vendored OmniContact carry-box validation scene. Its included robot/ghost XML
+# and all referenced meshes live under this repository's assets directory.
+xml_path: "assets/omnicontact_carry_box.xml"
 
 udp:
   state_host: "127.0.0.1"

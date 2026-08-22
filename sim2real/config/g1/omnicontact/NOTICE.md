@@ -7,7 +7,11 @@ commit `3a61521`:
 - `OmniContact.yaml`: model/control values preserved, with whitespace cleanup;
 - `DefaultPose.yaml`: reference pose configuration;
 - `g1_29dof_fk.xml`: `g1_29dof.xml` with visual mesh assets and mesh geoms
-  removed; the kinematic joint/body tree is retained for policy observation FK.
+  removed; the kinematic joint/body tree is retained for policy observation FK;
+- `../assets/omnicontact_carry_box.xml`, `../assets/g1_29dof.xml`, and
+  `../assets/g1_ghost.xml`: the carry-box MuJoCo validation scene and its two
+  included robot models. The scene reuses the byte-identical G1 mesh files
+  already stored under `../assets/meshes/`.
 
 The carry-box CFgen code under `src/omnicontact/reference` is the carry-only
 adaptation previously developed in the sibling Deploy repository.

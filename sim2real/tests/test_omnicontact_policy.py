@@ -2,6 +2,7 @@ import time
 import unittest
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import yaml
 
@@ -30,6 +31,28 @@ class TestOmniContactPolicy(unittest.TestCase):
 
     def setUp(self):
         self.policy.reset()
+
+    def test_carrybox_sim_scene_is_bundled_and_loadable(self):
+        config_path = SIM2REAL_ROOT / "config/g1/bridge_omnicontact.yaml"
+        bridge_config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        scene_path = (config_path.parent / bridge_config["xml_path"]).resolve()
+
+        self.assertTrue(scene_path.is_relative_to(SIM2REAL_ROOT))
+        self.assertTrue(scene_path.is_file())
+        model = mujoco.MjModel.from_xml_path(scene_path.as_posix())
+        self.assertEqual(model.nu, 29)
+        self.assertGreaterEqual(
+            mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "box"),
+            0,
+        )
+        self.assertGreaterEqual(
+            mujoco.mj_name2id(
+                model,
+                mujoco.mjtObj.mjOBJ_JOINT,
+                "ghost_floating_base_joint",
+            ),
+            0,
+        )
 
     def test_joint_permutations_are_inverse_and_match_controller_order(self):
         values = np.arange(29, dtype=np.float32)
