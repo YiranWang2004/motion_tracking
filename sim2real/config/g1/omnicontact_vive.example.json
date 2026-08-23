@@ -15,5 +15,5 @@
     "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
   },
   "object_half_extents_m": [0.15, 0.15, 0.15],
-  "goal_position_w": [3.0, 0.0, 0.26]
+  "goal_position_w": [1.0, 1.0, 0.15]
 }
