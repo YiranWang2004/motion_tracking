@@ -1,0 +1,54 @@
+{
+  "calibration_confirmed": true,
+  "robot_tracker_serial": "LHR-AFB66641",
+  "object_tracker_serial": "LHR-F26D5F24",
+  "world_from_steamvr": {
+    "position_m": [
+      0.08606135642890467,
+      -1.188469108541802,
+      1.9534353238616617
+    ],
+    "quaternion_xyzw": [
+      -0.6762167137094539,
+      0.18069683315238405,
+      0.1768425670240507,
+      -0.6919583203322509
+    ]
+  },
+  "robot_tracker_to_pelvis": {
+    "position_m": [
+      0.0,
+      0.0,
+      0.07
+    ],
+    "quaternion_xyzw": [
+      0.5,
+      -0.5,
+      0.5,
+      0.5
+    ]
+  },
+  "object_tracker_to_object": {
+    "position_m": [
+      0.0,
+      0.0,
+      0.15
+    ],
+    "quaternion_xyzw": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "object_half_extents_m": [
+    0.15,
+    0.15,
+    0.15
+  ],
+  "goal_position_w": [
+    3.0,
+    0.0,
+    0.26
+  ]
+}
