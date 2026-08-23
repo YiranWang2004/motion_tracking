@@ -33,6 +33,7 @@ from omnicontact.perception.vive_pose import (
     ViveDeploymentConfig,
     sample_to_transform,
 )
+from omnicontact.visualization_udp import VisualizationReceiver
 
 
 AXIS_LENGTH = 0.22
@@ -115,19 +116,98 @@ def _set_mocap(model: mujoco.MjModel, data: mujoco.MjData, body_name: str, trans
     data.mocap_quat[mocap_id] = (q[3], q[0], q[1], q[2])
 
 
-def _load_joint_setup(model: mujoco.MjModel, config_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+def _load_joint_setup(
+    model: mujoco.MjModel, config_dir: Path
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     controller = yaml.safe_load((config_dir / "bridge_omnicontact.yaml").read_text())
-    names = list(controller["policy_joint_names"])
+    policy_names = list(controller["policy_joint_names"])
+    mujoco_names = list(controller.get("mujoco_joint_names", policy_names))
     defaults = yaml.safe_load((config_dir / "omnicontact" / "OmniContact.yaml").read_text())["default_angles_lab"]
-    if len(names) != len(defaults):
+    if len(policy_names) != len(defaults):
         raise RuntimeError("policy_joint_names and default_angles_lab have different lengths")
     addresses = []
-    for name in names:
+    for name in policy_names:
         jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
         if jid < 0:
             raise RuntimeError(f"MuJoCo model is missing joint {name!r}")
         addresses.append(int(model.jnt_qposadr[jid]))
-    return np.asarray(addresses, dtype=int), np.asarray(defaults, dtype=float)
+    ghost_addresses = []
+    for name in mujoco_names:
+        jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"ghost_{name}")
+        if jid < 0:
+            raise RuntimeError(f"MuJoCo model is missing ghost joint {name!r}")
+        ghost_addresses.append(int(model.jnt_qposadr[jid]))
+    return (
+        np.asarray(addresses, dtype=int),
+        np.asarray(defaults, dtype=float),
+        np.asarray(ghost_addresses, dtype=int),
+    )
+
+
+def _dof_addr(model: mujoco.MjModel, joint_name: str) -> int:
+    jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+    if jid < 0:
+        raise RuntimeError(f"missing joint {joint_name!r}")
+    return int(model.jnt_dofadr[jid])
+
+
+def _set_freejoint_pose(data: mujoco.MjData, address: int, pose: np.ndarray) -> None:
+    data.qpos[address : address + 7] = pose
+
+
+def _hide_reference_visuals(model: mujoco.MjModel) -> dict[int, float]:
+    hidden: dict[int, float] = {}
+    for geom_id in range(model.ngeom):
+        body_id = int(model.geom_bodyid[geom_id])
+        body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
+        if body_name and (body_name.startswith("ref_") or body_name.startswith("ghost_")):
+            hidden[geom_id] = float(model.geom_rgba[geom_id, 3])
+            model.geom_rgba[geom_id, 3] = 0.0
+    return hidden
+
+
+def _apply_visualization(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    visualization: dict,
+    visual_mocap_ids: dict[str, int],
+    ghost_object_qpos: int,
+    ghost_robot_qpos: int,
+    ghost_joint_qpos: np.ndarray,
+    hidden_alpha: dict[int, float],
+    contact_geom_ids: np.ndarray,
+) -> None:
+    scene = visualization.get("scene")
+    if isinstance(scene, dict):
+        for name in ("start_plane_wxyz", "goal_plane_wxyz"):
+            mocap_id = visual_mocap_ids[name]
+            data.mocap_pos[mocap_id] = scene[name][:3]
+            data.mocap_quat[mocap_id] = scene[name][3:7]
+    reference = visualization.get("reference")
+    if not isinstance(reference, dict):
+        return
+    for geom_id, alpha in hidden_alpha.items():
+        model.geom_rgba[geom_id, 3] = alpha
+    for name in (
+        "left_wrist_wxyz", "right_wrist_wxyz", "torso_wxyz",
+        "left_ankle_wxyz", "right_ankle_wxyz",
+    ):
+        mocap_id = visual_mocap_ids[name]
+        data.mocap_pos[mocap_id] = reference[name][:3]
+        data.mocap_quat[mocap_id] = reference[name][3:7]
+    _set_freejoint_pose(data, ghost_object_qpos, reference["object_wxyz"])
+    if "ghost_base_wxyz" in reference:
+        _set_freejoint_pose(data, ghost_robot_qpos, reference["ghost_base_wxyz"])
+    if "ghost_dof_pos" in reference:
+        values = np.asarray(reference["ghost_dof_pos"], dtype=np.float32).reshape(-1)
+        if values.size == ghost_joint_qpos.size:
+            data.qpos[ghost_joint_qpos] = values
+    contact_on = np.asarray(reference["contact"], dtype=np.float32).reshape(4) >= 0.5
+    for geom_id, active in zip(contact_geom_ids, contact_on):
+        if geom_id >= 0:
+            model.geom_rgba[geom_id] = (
+                [1.0, 0.0, 0.0, 0.7] if active else [1.0, 1.0, 0.0, 0.7]
+            )
 
 
 def _set_robot_visibility(model: mujoco.MjModel, visible: bool) -> None:
@@ -153,7 +233,15 @@ def _args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--xml-path", default="config/g1/assets/omnicontact_carry_box.xml")
     parser.add_argument("--fps", type=float, default=60.0)
     parser.add_argument("--state-host", default="127.0.0.1")
-    parser.add_argument("--state-port", type=int, default=None, help="optional read-only G1 state UDP port")
+    parser.add_argument(
+        "--state-port",
+        type=int,
+        default=55003,
+        help="read-only G1 state mirror UDP port (bridge default: 55003); use 0 to disable",
+    )
+    parser.add_argument("--visualization-host", default="127.0.0.1")
+    parser.add_argument("--visualization-port", type=int, default=55004)
+    parser.add_argument("--no-visualization", action="store_true")
     parser.add_argument("--stale-timeout", type=float, default=0.5)
     parser.add_argument("--no-robot", action="store_true", help="hide the G1 mesh")
     args = parser.parse_args(argv)
@@ -184,9 +272,15 @@ def main(argv: list[str] | None = None) -> int:
     xml_path = (root / args.xml_path).resolve()
     reader = OpenVRTrackerReader((config.robot_tracker_serial, config.object_tracker_serial))
     receiver = None
-    if args.state_port is not None:
+    if args.state_port:
         receiver = UDPLatestReceiver(args.state_host, args.state_port)
         receiver.start()
+    visualization_receiver = None
+    if not args.no_visualization:
+        visualization_receiver = VisualizationReceiver(
+            args.visualization_host, args.visualization_port
+        )
+        visualization_receiver.start()
 
     temp = tempfile.NamedTemporaryFile("w", suffix=".xml", prefix="calibrated_view_", dir=xml_path.parent, delete=False, encoding="utf-8")
     temp_path = Path(temp.name)
@@ -201,7 +295,39 @@ def main(argv: list[str] | None = None) -> int:
         tracker_object = _qpos_addr(model, "calib_object_tracker_free")
         # Joint order/defaults belong to config/g1, while xml_path normally
         # points one level deeper at config/g1/assets.
-        joint_addr, default_angles = _load_joint_setup(model, root / "config" / "g1")
+        joint_addr, default_angles, ghost_joint_addr = _load_joint_setup(
+            model, root / "config" / "g1"
+        )
+        ghost_object_qpos = _qpos_addr(model, "ghost_box_joint")
+        ghost_robot_qpos = _qpos_addr(model, "ghost_floating_base_joint")
+        visual_mocap_ids = {
+            name: int(model.body_mocapid[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)])
+            for name in (
+                "plane_1_holder", "plane_2_holder", "ref_l_wrist_frame",
+                "ref_r_wrist_frame", "ref_torso_frame", "ref_l_ankle_frame",
+                "ref_r_ankle_frame",
+            )
+        }
+        visual_mocap_ids = {
+            "start_plane_wxyz": visual_mocap_ids["plane_1_holder"],
+            "goal_plane_wxyz": visual_mocap_ids["plane_2_holder"],
+            "left_wrist_wxyz": visual_mocap_ids["ref_l_wrist_frame"],
+            "right_wrist_wxyz": visual_mocap_ids["ref_r_wrist_frame"],
+            "torso_wxyz": visual_mocap_ids["ref_torso_frame"],
+            "left_ankle_wxyz": visual_mocap_ids["ref_l_ankle_frame"],
+            "right_ankle_wxyz": visual_mocap_ids["ref_r_ankle_frame"],
+        }
+        contact_geom_ids = np.asarray(
+            [
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+                for name in (
+                    "ref_l_ankle_mesh", "ref_r_ankle_mesh",
+                    "ref_l_rubber_hand", "ref_r_rubber_hand",
+                )
+            ],
+            dtype=int,
+        )
+        hidden_alpha = _hide_reference_visuals(model)
         data.qpos[joint_addr] = default_angles
         if args.no_robot:
             _set_robot_visibility(model, False)
@@ -212,6 +338,8 @@ def main(argv: list[str] | None = None) -> int:
         print("Blue/orange pyramids are trackers; red/green/blue axes are X/Y/Z. Read-only viewer.")
         frame_period = 1.0 / args.fps
         last_state_seq = None
+        last_visual_seq = None
+        last_visual_time = 0.0
         with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
             viewer.cam.lookat[:] = (0.8, 0.0, 0.8)
             viewer.cam.distance = 3.0
@@ -241,6 +369,30 @@ def main(argv: list[str] | None = None) -> int:
                         if q.size == joint_addr.size and np.all(np.isfinite(q)):
                             data.qpos[joint_addr] = q
                             last_state_seq = packet.seq
+                if visualization_receiver is not None:
+                    packet = visualization_receiver.read_latest(with_meta=True)
+                    if packet is not None and packet.seq != last_visual_seq:
+                        visualization = packet.data
+                        _apply_visualization(
+                            model,
+                            data,
+                            visualization,
+                            visual_mocap_ids,
+                            ghost_object_qpos,
+                            ghost_robot_qpos,
+                            ghost_joint_addr,
+                            hidden_alpha,
+                            contact_geom_ids,
+                        )
+                        last_visual_seq = packet.seq
+                        last_visual_time = started
+                if (
+                    last_visual_time > 0.0
+                    and started - last_visual_time > args.stale_timeout
+                ):
+                    # Keep the last pose visible, but avoid presenting stale
+                    # reference geometry as a live policy update.
+                    pass
                 mujoco.mj_forward(model, data)
                 viewer.sync()
                 delay = frame_period - (time.monotonic() - started)
@@ -250,6 +402,8 @@ def main(argv: list[str] | None = None) -> int:
         reader.stop()
         if receiver is not None:
             receiver.close()
+        if visualization_receiver is not None:
+            visualization_receiver.close()
         try:
             temp_path.unlink()
         except OSError:

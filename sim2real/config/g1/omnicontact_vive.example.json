@@ -1,6 +1,6 @@
 {
   "calibration_confirmed": false,
-  "robot_tracker_serial": "LHR-AFB66641",
+  "robot_tracker_serial": "LHR-AFB66641", 
   "object_tracker_serial": "LHR-F26D5F24",
   "world_from_steamvr": {
     "position_m": [0.0, 0.0, 0.0],

@@ -15,6 +15,7 @@ from omnicontact.runtime import (
     MotionBridgeClient,
     pose_pair_is_valid,
 )
+from omnicontact.visualization_udp import decode_visualization, encode_visualization
 from paths import SIM2REAL_ROOT
 
 
@@ -281,6 +282,28 @@ class TestOmniContactPolicy(unittest.TestCase):
             atol=1e-7,
         )
         self.assertEqual(visual["reference"]["ghost_dof_pos"].shape, (29,))
+
+    def test_read_only_visualization_packet_round_trip(self):
+        scene = {
+            "start_plane_wxyz": np.arange(7, dtype=np.float32),
+            "goal_plane_wxyz": np.arange(7, dtype=np.float32) + 1,
+        }
+        reference = {
+            "left_wrist_wxyz": np.zeros(7, dtype=np.float32),
+            "right_wrist_wxyz": np.zeros(7, dtype=np.float32),
+            "torso_wxyz": np.zeros(7, dtype=np.float32),
+            "left_ankle_wxyz": np.zeros(7, dtype=np.float32),
+            "right_ankle_wxyz": np.zeros(7, dtype=np.float32),
+            "object_wxyz": np.zeros(7, dtype=np.float32),
+            "contact": np.ones(4, dtype=np.float32),
+            "ghost_base_wxyz": np.zeros(7, dtype=np.float32),
+            "ghost_dof_pos": np.zeros(29, dtype=np.float32),
+        }
+        packet = encode_visualization(scene, reference)
+        decoded = decode_visualization(packet)
+        self.assertIsNotNone(decoded)
+        np.testing.assert_allclose(decoded["scene"]["goal_plane_wxyz"], scene["goal_plane_wxyz"])
+        np.testing.assert_allclose(decoded["reference"]["ghost_dof_pos"], reference["ghost_dof_pos"])
 
 
 if __name__ == "__main__":

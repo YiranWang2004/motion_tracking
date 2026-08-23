@@ -25,6 +25,7 @@ from omnicontact.runtime import (
     MotionBridgeClient,
     pose_pair_is_valid,
 )
+from omnicontact.visualization_udp import VisualizationSender
 from paths import SIM2REAL_ROOT, controller_config_path, robot_config_path
 
 
@@ -85,6 +86,17 @@ def build_parser() -> argparse.ArgumentParser:
         or os.environ.get("ROBOJUDO_POSE_TOKEN"),
     )
     parser.add_argument("--allowed-sender-ip", default=None)
+    parser.add_argument(
+        "--visualization-host",
+        default="127.0.0.1",
+        help="read-only MuJoCo twin host (independent from the motor UDP ports)",
+    )
+    parser.add_argument("--visualization-port", type=int, default=55004)
+    parser.add_argument(
+        "--no-visualization",
+        action="store_true",
+        help="disable the read-only reference/ghost visualization stream",
+    )
     parser.add_argument("--run-seconds", type=float, default=None)
     parser.add_argument("--prepare-seconds", type=float, default=None)
     parser.add_argument("--max-target-delta", type=float, default=None)
@@ -117,6 +129,8 @@ def validate_args(args: argparse.Namespace) -> None:
             raise SystemExit(f"--{name.replace('_', '-')} must be positive")
     if not 1 <= args.udp_port <= 65535:
         raise SystemExit("--udp-port must be in [1, 65535]")
+    if not 1 <= args.visualization_port <= 65535:
+        raise SystemExit("--visualization-port must be in [1, 65535]")
 
 
 def make_pose_provider(
@@ -489,6 +503,12 @@ def main() -> int:
     )
     provider = make_pose_provider(args, vive_config)
     client: MotionBridgeClient | None = None
+    visualization_sender = None
+    if not args.no_visualization:
+        visualization_sender = VisualizationSender(
+            args.visualization_host,
+            args.visualization_port,
+        )
     policy: OmniContactCarryPolicy | None = None
     last_state: BridgeState | None = None
     try:
@@ -496,6 +516,7 @@ def main() -> int:
         client = MotionBridgeClient(
             controller_config["udp"],
             pose_sink=provider if isinstance(provider, BridgePoseProvider) else None,
+            visualization_sender=visualization_sender,
         )
         last_state = _wait_for_bridge(client, wait_timeout_s)
         LOGGER.info("Waiting for a complete robot/object pose pair...")

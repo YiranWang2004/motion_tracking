@@ -71,6 +71,10 @@ cd <repo>/sim2real
 uv sync
 ```
 
+manus right: LHR-852AE328 for box
+w/o mark: LHR-AFB66641 on robot
+manus left: LHR-F26D5F24 
+
 All Python commands below should be run from `sim2real/`.
 Supported robot keys are `g1` and `l7`.
 

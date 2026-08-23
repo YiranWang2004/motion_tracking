@@ -1,0 +1,320 @@
+/home/bcj/wyr/motion_tracking我希望sim2real的时候，能够根据实时读取的tracker位姿，显示和sim2sim形式上对齐的仿真孪生部署情况，便于调试，现在实现了吗
+
+
+
+
+
+
+
+15:13
+
+
+
+
+
+
+耗时 2分钟 18秒
+
+
+
+目前是“部分实现”，但你描述的完整功能还没有打通。
+已经实现的部分：
+- Tracker 实时读取和标定：
+  - VivePoseProvider 会读取 robot Tracker 和 object Tracker；
+  - 将它们转换成世界坐标系下的 pelvis 和 box 位姿；
+  - UdpPoseReceiverProvider 支持从另一台机器接收经过 HMAC 校验的 Tracker 位姿。
+- 已有一个独立的标定可视化脚本 [view_calibrated_omnicontact_poses.py (line 1)](/home/bcj/wyr/motion_tracking/sim2real/scripts/view_calibrated_omnicontact_poses.py:1)：
+  - 复用和 sim2sim 相同的搬箱 XML；
+  - 根据 Tracker 实时更新 G1 pelvis 和箱子；
+  - 显示两个 Tracker、坐标轴、pelvis 和箱子坐标轴；
+  - 加 --state-port 55001 后，还可以叠加 G1 bridge 发布的实时 29 个关节。
+- real_state_viewer.py 可以显示实机测量关节，但它不是 Tracker 孪生显示：根部平移固定为 (0, 0, 0.793)，根部姿态使用 IMU，而不是 Tracker 位姿，见 [real_state_viewer.py (line 85)](/home/bcj/wyr/motion_tracking/sim2real/src/real_state_viewer.py:85)。
+尚未实现的关键部分：
+- sim2sim 中的完整可视化不仅是“显示真实机器人和箱子”，还包括：
+  - 当前参考轨迹；
+  - reference robot；
+  - ghost robot；
+  - ghost box；
+  - 接触状态；
+  - 起点/终点平面。
+- 这些内容在 [sim2sim.py (line 360)](/home/bcj/wyr/motion_tracking/sim2real/src/sim2sim.py:360) 中通过 extra_command["omnicontact_visualization"] 更新。
+- 但是 sim2real 部署时，只有 pose_source=sim 才会把 BridgePoseProvider 传给 MotionBridgeClient：
+  [deploy_omnicontact.py (line 496)](/home/bcj/wyr/motion_tracking/sim2real/src/deploy_omnicontact.py:496)
+  对 local 或 udp Tracker 模式，pose_sink 被明确设置为 None。
+- 随后 [`MotionBridgeClient.send()` (line 252)](/home/bcj/wyr/motion_tracking/sim2real/src/omnicontact/runtime.py:252) 只有在 pose_sink is not None 时才构造和发送 omnicontact_visualization 数据。因此真实 Tracker 位姿虽然参与了策略计算和电机控制，但策略生成的 ghost/reference 可视化数据不会被发送到任何仿真查看器。
+所以当前实际效果是：
+功能	当前状态
+Tracker 实时读取	已实现
+Tracker 标定到 pelvis/box	已实现
+Tracker + 实体 G1/箱子显示	已实现，使用独立查看器
+实时 G1 关节叠加	已实现，需 --state-port 55001
+与 sim2sim 完全一致的 reference/ghost 显示	未实现
+sim2real 控制进程自动驱动一个孪生窗口	未实现
+Tracker 位姿、实际关节、策略 ghost 在同一窗口对齐	未实现
+
+
+目前可以运行的只是“标定世界中的真实状态预览”：
+cd /home/bcj/wyr/motion_tracking/sim2real
+
+uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --state-host 127.0.0.1 \
+  --state-port 55001
+这个窗口能看到 Tracker 驱动的 pelvis 和箱子，以及实机测量关节，但看不到 sim2sim 中的 ghost/reference 轨迹。
+现有测试也只验证了 sim 模式下 omnicontact_visualization 命令被生成，见 [test_omnicontact_policy.py (line 252)](/home/bcj/wyr/motion_tracking/sim2real/tests/test_omnicontact_policy.py:252)，没有覆盖 local/udp sim2real 模式的孪生可视化链路。
+因此，如果你的目标是“sim2real 运行时，根据实时 Tracker 位姿，在一个和 sim2sim 完全一致的 MuJoCo 窗口里同时显示真实状态和策略 ghost/reference”，结论是：目前还没有完成，现有代码大约完成了 Tracker 对齐预览和实机状态显示，但缺少真实部署到孪生查看器的可视化数据通道。
+
+
+15:16
+
+
+
+
+
+
+
+
+sim2real 运行时，根据实时 Tracker 位姿，在一个和 sim2sim 完全一致的 MuJoCo 窗口里同时显示真实状态和策略 ghost/reference。完成这一点，是不是窗口应该通过G1_NET=enx6c1ff770ecdd bash scripts/run_bridge.sh这个脚本同步启动？
+
+
+
+
+
+
+
+15:17
+
+
+
+
+
+
+耗时 21秒
+
+
+
+不是直接把 MuJoCo 窗口放进 G1_NET=enx6c1ff770ecdd bash scripts/run_bridge.sh 里启动。
+这个脚本的职责只有一件事：启动 C++ G1 bridge，并通过 G1_NET 指定 Unitree DDS 使用的网卡：
+G1_NET=enx6c1ff770ecdd bash scripts/run_bridge.sh
+它会负责：
+- 读取 G1 的 rt/lowstate；
+- 接收 Python 控制器发到 UDP 55002 的电机命令；
+- 发布实时关节状态到 UDP 55001；
+- 复制一份只读状态到 UDP 55003，供查看器使用。
+它不会启动 Python、OpenVR、MuJoCo viewer，也不会自动读取 Tracker。当前配置中这一点很明确：
+state_port: 55001
+state_mirror_port: 55003
+state_mirror_host: "127.0.0.1"
+更合理的进程关系应该是：
+g1_udp_bridge
+    ├── UDP 55001：给 deploy_omnicontact 读取实机状态
+    └── UDP 55003：给孪生 viewer 读取实机关节/IMU状态
+
+deploy_omnicontact
+    ├── 读取 Tracker 位姿
+    ├── 运行策略
+    ├── 发送电机命令到 bridge:55002
+    └── 发送 reference/ghost 可视化数据到 viewer
+
+real twin viewer
+    ├── 读取 UDP 55003 的真实关节状态
+    ├── 读取 Tracker 的 pelvis/box 位姿
+    └── 读取 deploy 发来的 ghost/reference 数据
+因此建议的启动顺序是：
+# 终端 1：启动 bridge
+cd /home/bcj/wyr/motion_tracking/g1_sim2real
+G1_NET=enx6c1ff770ecdd bash scripts/run_bridge.sh
+# 终端 2：启动孪生窗口
+cd /home/bcj/wyr/motion_tracking/sim2real
+# 未来的 real_omnicontact_viewer.py
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --state-port 55003
+# 终端 3：启动 sim2real 控制器
+cd /home/bcj/wyr/motion_tracking/sim2real
+uv run --extra vive python src/deploy_omnicontact.py \
+  --robot g1 \
+  --pose-source local \
+  --vive-config config/g1/omnicontact_vive.json \
+  --act \
+  --confirm-actuation ENABLE_MOTORS
+viewer 可以在 bridge 之后启动，也可以先启动后等待数据；但它应该是独立进程，不应该运行在 C++ bridge 的实时线程里。原因是 MuJoCo GUI、OpenVR 和 Python 调度都可能阻塞或产生调度抖动，不能影响 1 kHz DDS/电机控制和 200 ms command watchdog。
+目前仓库里的 [view_calibrated_omnicontact_poses.py (line 1)](/home/bcj/wyr/motion_tracking/sim2real/scripts/view_calibrated_omnicontact_poses.py:1) 可以作为这个窗口的基础，但它还不是完整的目标版本。它目前能：
+- 读 Tracker；
+- 用 Tracker 更新 pelvis 和 box；
+- 通过 --state-port 55001 叠加实机关节；
+但不能接收 deploy_omnicontact 产生的 sim2sim reference/ghost 轨迹。
+要完成你描述的功能，还需要增加一条独立的“可视化数据通道”：
+1. deploy_omnicontact 在 local/udp 模式下也发送 ReferenceVisualization；
+2. 发送目标不能依赖电机命令 UDP，最好使用独立的只读 UDP 端口，例如 55004；
+3. 孪生 viewer 同时订阅：
+   - bridge 状态镜像 55003；
+   - Tracker 位姿；
+   - reference/ghost 可视化包 55004；
+4. viewer 在与 sim2sim 相同的 XML 中分别显示：
+   - 实际机器人；
+   - 实际箱子；
+   - sim2sim reference；
+   - ghost robot；
+   - ghost box；
+   - 接触状态和起终点平面。
+如果 viewer 与 bridge 不在同一台机器上，还需要把 state_mirror_host 从 127.0.0.1 改成 viewer 所在机器的 IP，并让 viewer 绑定对应网卡。G1_NET 只决定 DDS 网卡，不决定 viewer 的网络地址。
+所以结论是：启动时可以把 bridge、viewer、deploy 编排成一个统一启动流程，但窗口本身不应该由 run_bridge.sh 直接启动；它应该作为独立 viewer 与 bridge 同步运行。
+
+
+15:17
+
+
+
+
+
+
+
+
+这样做
+
+
+
+
+
+
+
+15:18
+
+
+
+
+
+
+我会按这个架构落地：新增独立的只读可视化 UDP 通道，让 deploy_omnicontact 在真实 Tracker 模式下发送 reference/ghost，新增一个复用 sim2sim XML 的实机孪生 viewer，同时保留 bridge 的电机与状态通道不变。最后补启动参数、文档和最小协议测试，验证 viewer 不会介入电机控制。
+
+
+
+
+已读取文件
+
+
+先建立独立可视化协议和发送端，再把它接入控制器；这个通道只发 MuJoCo 显示数据，不复用电机命令端口，因此 viewer 崩溃或关闭不会影响 bridge/watchdog。
+
+
+
+
+编辑了文件读取文件
+
+
+耗时 3分钟 31秒
+
+
+
+
+可视化发送端和 viewer 主体已经接上了。现在我在做静态检查，重点排除关节排列、mocap/freejoint 地址和异常清理问题，避免 viewer 能启动但 ghost 姿态错位。
+
+
+
+
+编辑了文件运行了命令已运行 python -m py_compile sim2real/src/omnicontact/visualization_udp.py sim2real/src/omnicontact/runtime.py sim2real/src/deploy_omnicontact.py sim2real/scripts/view_calibrated_omnicontact_poses.py
+
+
+
+
+已运行 uv run python -m py_compile src/omnicontact/visualization_udp.py src/omnicontact/runtime.py src/deploy_omnicontact.py scripts/view_calibrated_omnicontact_poses.py
+
+
+
+
+已编辑 runtime.py+6-4
+
+
+
+
+
+
+已运行 uv run python -m unittest discover -s tests -v
+
+
+
+
+已在 3s 内运行 PYTHONPATH=src uv run python -m unittest discover -s tests -v
+
+
+
+
+已编辑 visualization_udp.py+2-3
+
+
+
+
+
+
+已编辑的文件
+
+view_calibrated_omnicontact_poses.py+7-2
+
+
+
+
+
+
+
+
+
+
+已编辑的文件
+
+test_omnicontact_policy.py+23-0
+
+
+
+
+
+
+
+
+
+
+已运行 tail -80 sim2real/tests/test_omnicontact_policy.py; uv run python -m py_compile src/omnicontact/visualization_udp.py src/omnicontact/runtime.py src/deploy_omnicontact.py scripts/view_calibrated_omnicontact_poses.py
+
+
+
+
+已运行 tail -100 tests/test_omnicontact_policy.py; uv run python -m py_compile src/omnicontact/visualization_udp.py src/omnicontact/runtime.py src/deploy_omnicontact.py scripts/view_calibrated_omnicontact_poses.py
+
+
+
+
+已编辑的文件
+
+test_omnicontact_policy.py+1-1
+
+
+
+
+
+
+
+
+
+
+已在 2s 内运行 PYTHONPATH=src uv run python -m unittest discover -s tests -v
+
+
+
+
+已运行 PYTHONPATH=src uv run python scripts/view_calibrated_omnicontact_poses.py --help | sed -n '1,160p'; PYTHONPATH=src uv run python src/deploy_omnicontact.py --help | sed -n '1,160p'
+
+
+
+
+
+
+
+
+
+正在重新连接 /5
+
+
+
+
+
+
+unexpected status 403 Forbidden: insufficient balance, url: https://ai.gmncode.com/responses, cf-ray: a2f8606e9ef0a985-HKG, request id: c7b74e83-89b7-41cf-9090-ce5336f1f6bc

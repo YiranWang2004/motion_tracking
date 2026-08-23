@@ -17,6 +17,7 @@ from omnicontact.contracts import (
     TaskGoal,
 )
 from omnicontact.perception.object_pose import ExternalObjectPoseProvider
+from omnicontact.visualization_udp import VisualizationSender
 
 
 class BridgePoseProvider(ExternalObjectPoseProvider):
@@ -123,9 +124,11 @@ class MotionBridgeClient:
         udp_config: Any,
         *,
         pose_sink: BridgePoseProvider | None = None,
+        visualization_sender: VisualizationSender | None = None,
     ) -> None:
         self.transport = UDPRobotHigh(udp_config)
         self.pose_sink = pose_sink
+        self.visualization_sender = visualization_sender
         self.last_seq: int | None = None
         self.skipped_packets = 0
         self._previous_buttons: dict[str, bool] | None = None
@@ -134,6 +137,9 @@ class MotionBridgeClient:
 
     def close(self) -> None:
         self.transport.close()
+        visualization_sender = getattr(self, "visualization_sender", None)
+        if visualization_sender is not None:
+            visualization_sender.close()
 
     def read_next(self, timeout_s: float | None) -> BridgeState | None:
         packet = self.transport.read_next_state(
@@ -217,8 +223,6 @@ class MotionBridgeClient:
 
     def set_carrybox_scene(self, object_pose: ObjectPose, goal: TaskGoal) -> None:
         """Configure sim-only start/goal planes using original runner semantics."""
-        if self.pose_sink is None:
-            return
         plane_z_offset = float(object_pose.half_extents[2]) + 0.01
         identity = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
         start_position = object_pose.position_w.copy()
@@ -270,6 +274,16 @@ class MotionBridgeClient:
                     visualization
                 )
             extra_command = {"omnicontact_visualization": omni_visualization}
+        visualization_sender = getattr(self, "visualization_sender", None)
+        if visualization_sender is not None and (
+            self._carrybox_scene is not None or visualization is not None
+        ):
+            reference_payload = (
+                None
+                if visualization is None
+                else self._reference_visualization_payload(visualization)
+            )
+            visualization_sender.send(self._carrybox_scene, reference_payload)
         return self.transport.send_command(
             q_des=command.target_pos,
             qd_des=zeros,
