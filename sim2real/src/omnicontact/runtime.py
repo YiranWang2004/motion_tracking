@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -18,6 +19,9 @@ from omnicontact.contracts import (
 )
 from omnicontact.perception.object_pose import ExternalObjectPoseProvider
 from omnicontact.visualization_udp import VisualizationSender
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class BridgePoseProvider(ExternalObjectPoseProvider):
@@ -135,6 +139,11 @@ class MotionBridgeClient:
         self._previous_buttons: dict[str, bool] | None = None
         self.button_rise: dict[str, bool] = {}
         self._carrybox_scene: dict[str, np.ndarray] | None = None
+        self.command_count = 0
+        self.last_command_gap_ms = 0.0
+        self.max_command_gap_ms = 0.0
+        self._last_command_attempt_ns: int | None = None
+        self.latest_state: BridgeState | None = None
 
     def close(self) -> None:
         self.transport.close()
@@ -187,7 +196,7 @@ class MotionBridgeClient:
             }
         self._previous_buttons = buttons
         state_time = data.get("state_receive_time_ns")
-        return BridgeState(
+        state = BridgeState(
             q_lab=q.copy(),
             dq_lab=dq.copy(),
             quat_wxyz=quat.copy(),
@@ -197,6 +206,8 @@ class MotionBridgeClient:
             packet_seq=int(packet.seq),
             packet_arrival_ns=int(packet.recv_time_ns),
         )
+        self.latest_state = state
+        return state
 
     def _publish_sim_pose(self, data: dict[str, Any]) -> None:
         raw = data.get("sim_pose")
@@ -299,7 +310,26 @@ class MotionBridgeClient:
                 )
             extra_command = {"omnicontact_visualization": omni_visualization}
         self.publish_visualization(visualization)
-        return self.transport.send_command(
+        attempt_ns = time.monotonic_ns()
+        self.last_command_gap_ms = getattr(self, "last_command_gap_ms", 0.0)
+        self.max_command_gap_ms = getattr(self, "max_command_gap_ms", 0.0)
+        last_attempt_ns = getattr(self, "_last_command_attempt_ns", None)
+        if last_attempt_ns is not None:
+            self.last_command_gap_ms = (
+                attempt_ns - last_attempt_ns
+            ) * 1e-6
+            self.max_command_gap_ms = max(
+                getattr(self, "max_command_gap_ms", 0.0),
+                self.last_command_gap_ms,
+            )
+            if self.last_command_gap_ms >= 100.0:
+                LOGGER.warning(
+                    "CONTROL COMMAND GAP: %.3f ms since previous send attempt; "
+                    "the default G1 bridge watchdog trips at 200 ms",
+                    self.last_command_gap_ms,
+                )
+        self._last_command_attempt_ns = attempt_ns
+        sequence = self.transport.send_command(
             q_des=command.target_pos,
             qd_des=zeros,
             kp=zeros if command.kp is None else command.kp,
@@ -308,6 +338,8 @@ class MotionBridgeClient:
             extra_command=extra_command,
             state_receive_time_ns=state.state_receive_time_ns,
         )
+        self.command_count = getattr(self, "command_count", 0) + 1
+        return sequence
 
     def send_zero(self, state: BridgeState) -> int:
         zeros = np.zeros(29, dtype=np.float32)

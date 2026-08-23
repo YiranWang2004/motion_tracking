@@ -355,7 +355,76 @@ uv run --extra vive python src/deploy_omnicontact.py \
   --confirm-actuation ENABLE_MOTORS
 ```
 
+uv run src/deploy_omnicontact.py \
+  --robot g1 \
+  --pose-source sim \
+  --goal-position 1.0 1.0 0.15 \
+  --max-target-delta 1.0 \
+  --act \
+  --confirm-actuation ENABLE_MOTORS
+
 操作顺序：等待 `ZERO TORQUE` → 遥控器按 `Start` → 等待默认姿态完成 → 确认场地和箱子安全 → 按 `A` → `Stop/Select` 停止。
+
+### 6.5 自动诊断日志
+
+按上述标准命令启动时，G1 bridge 和 `deploy_omnicontact.py` 都会自动将终端信息写入同一个目录：
+
+```text
+<仓库根目录>/logs/omnicontact/
+```
+
+文件名分别以 `bridge_` 和 `deploy_` 开头，并包含启动时间和进程 PID。启动时两个终端都会打印本次使用的完整日志路径。Python 日志额外记录：A 被接受时的完整位姿/新鲜度、Tracker 有效/无效更新累计数、CFGen 规划耗时、首帧策略耗时、控制命令最大间隔、异常堆栈，以及每一次 damping 的触发位置。bridge 日志保留 watchdog 锁存、命令频率、拒绝命令数和 DDS 输出信息。
+
+Python 还会自动生成同名的 `deploy_*.observations.npz` 压缩轨迹。它按策略控制帧保存：实际送入 ONNX 的 1244 维 observation、策略内部 5×141 历史、Tracker 的 pelvis/object 位置与四元数、物体线/角速度、位姿年龄与有效性、Tracker 有效/无效更新累计数、29 维关节位置/速度、IMU、29 维策略 action、限幅前/后的关节目标、kp/kd、策略耗时和命令间隔。bridge 超时时还会写入 `bridge_state_timeout` 终止行，并重新检查当时 Tracker 位姿是否仍新鲜；Tracker 遮挡则写入 `pose_pair_invalid_hold` 行。因此下次可直接区分 Tracker 遮挡、观测突变、策略输出异常、关节限幅和 bridge/DDS 断流。
+
+快速查看文件结构和故障末尾：
+
+```bash
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+uv run python - <<'PY'
+import json
+import numpy as np
+
+path = "../logs/omnicontact/deploy_XXXX.observations.npz"
+with np.load(path, allow_pickle=False) as data:
+    print(json.loads(str(data["metadata_json"])))
+    print(data.files)
+    print("events:", data["event"][-10:])
+    print("pose valid:", data["pose_pair_valid"][-10:])
+    print("provider invalid:", data["provider_invalid_count"][-10:])
+    print("observation shape:", data["observation"].shape)
+PY
+```
+
+发生倒地后不要覆盖或编辑日志。直接查看最近文件：
+
+```bash
+cd /home/yiranwang/TeleHuman/motion_tracking
+ls -lht logs/omnicontact | head -20
+rg -n "A accepted|Carry reference ready|CONTROL COMMAND GAP|FATAL|FAILSAFE|WATCHDOG|damping|watchdog_latched" \
+  logs/omnicontact
+```
+
+之后只需说明“分析最近一次 OmniContact 日志”，即可从该目录配对检查最近的 `deploy_*.log` 和 `bridge_*.log`。
+
+可选地指定 Python 日志位置：
+
+```bash
+uv run --extra vive python src/deploy_omnicontact.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --pose-source local \
+  --log-file /absolute/path/deploy_case.log
+```
+
+可选地指定 bridge 日志位置：
+
+```bash
+G1_NET=<WIRED_INTERFACE> \
+G1_BRIDGE_LOG_FILE=/absolute/path/bridge_case.log \
+  bash scripts/run_bridge.sh
+```
+
+可用 `--history-file /absolute/path/case.npz` 单独指定观测轨迹路径，或用 `--no-history-file` 只关闭观测轨迹。`--no-file-log` 关闭文本日志；bridge 可设置 `G1_BRIDGE_NO_FILE_LOG=1`。实机故障复现不建议关闭任何日志。
 
 ## 7. 远程 Vive UDP 模式
 

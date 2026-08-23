@@ -11,6 +11,7 @@ import numpy as np
 import yaml
 
 from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
+from omnicontact.diagnostics import ObservationHistoryRecorder
 from omnicontact.loco_mode import LocoModePolicy
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
 from omnicontact.runtime import (
@@ -513,6 +514,91 @@ class TestOmniContactPolicy(unittest.TestCase):
         )
         np.testing.assert_allclose(hold.target_pos, -0.5)
 
+    def test_observation_history_recorder_round_trip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "deploy_case.observations.npz"
+            recorder = ObservationHistoryRecorder(
+                path,
+                joint_names=[f"joint_{index}" for index in range(29)],
+                metadata={"pose_source": "local"},
+            )
+            stamp = time.monotonic()
+            robot = RobotPose([0, 0, 0.77], [0, 0, 0, 1], stamp)
+            obj = ObjectPose(
+                [1, 0, 0.3],
+                [0, 0, 0, 1],
+                [0.1, 0.2, 0.3],
+                stamp,
+                linear_velocity_w=[0.01, 0.02, 0.03],
+                angular_velocity_w=[0.04, 0.05, 0.06],
+            )
+            state = BridgeState(
+                q_lab=np.arange(29, dtype=np.float32),
+                dq_lab=np.arange(29, dtype=np.float32) * 0.1,
+                quat_wxyz=np.array([1, 0, 0, 0], dtype=np.float32),
+                gyro=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+                buttons={},
+                state_receive_time_ns=123,
+                packet_seq=456,
+                packet_arrival_ns=789,
+            )
+            provider = SimpleNamespace(valid_updates=100, invalid_updates=3)
+            command = PDCommand(
+                np.arange(29, dtype=np.float32) * 0.01,
+                np.ones(29, dtype=np.float32) * 40.0,
+                np.ones(29, dtype=np.float32) * 2.0,
+            )
+            observation = np.arange(1244, dtype=np.float32)
+            history = np.arange(5 * 141, dtype=np.float32).reshape(5, 141)
+            action = np.arange(29, dtype=np.float32) * -0.01
+            recorder.record(
+                state=state,
+                provider=provider,
+                policy_frame=7,
+                event="policy_tracking",
+                task_state="executing",
+                pose_pair_valid=True,
+                robot_pose=robot,
+                object_pose=obj,
+                observation=observation,
+                observation_history=history,
+                policy_action=action,
+                raw_command=command,
+                safe_command=command,
+                policy_compute_ms=2.5,
+                command_gap_ms=20.0,
+            )
+            recorder.save(termination_reason="fatal_exception")
+
+            self.assertTrue(path.is_file())
+            self.assertFalse(path.with_name(path.name + ".tmp.npz").exists())
+            with np.load(path, allow_pickle=False) as archive:
+                self.assertEqual(archive["observation"].shape, (1, 1244))
+                self.assertEqual(archive["observation_history"].shape, (1, 5, 141))
+                np.testing.assert_array_equal(archive["observation"][0], observation)
+                np.testing.assert_array_equal(archive["observation_history"][0], history)
+                np.testing.assert_array_equal(archive["policy_action"][0], action)
+                self.assertEqual(archive["provider_invalid_count"][0], 3)
+                self.assertEqual(str(archive["event"][0]), "policy_tracking")
+                metadata = json.loads(str(archive["metadata_json"]))
+                self.assertEqual(metadata["termination_reason"], "fatal_exception")
+                self.assertEqual(metadata["row_count"], 1)
+                schema = json.loads(str(archive["schema_json"]))
+                self.assertEqual(schema["observation_layout"]["tracking_reference"], [0, 539])
+
+    def test_empty_observation_history_recorder_has_stable_shapes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "empty.observations.npz"
+            recorder = ObservationHistoryRecorder(
+                path,
+                joint_names=[f"joint_{index}" for index in range(29)],
+            )
+            recorder.save(termination_reason="startup_failure")
+            with np.load(path, allow_pickle=False) as archive:
+                self.assertEqual(archive["observation"].shape, (0, 1244))
+                self.assertEqual(archive["observation_history"].shape, (0, 5, 141))
+                self.assertEqual(archive["q_lab"].shape, (0, 29))
+
     def test_pose_pair_freshness_requires_both_poses(self):
         stamp = time.monotonic()
         robot = RobotPose([0, 0, 0.77], [0, 0, 0, 1], stamp)
@@ -613,6 +699,9 @@ class TestOmniContactPolicy(unittest.TestCase):
             state=bridge_state,
             visualization=step.visualization,
         )
+        self.assertEqual(client.command_count, 1)
+        self.assertEqual(client.last_command_gap_ms, 0.0)
+        self.assertEqual(client.max_command_gap_ms, 0.0)
         visual = client.transport.kwargs["extra_command"]["omnicontact_visualization"]
         np.testing.assert_allclose(
             visual["scene"]["start_plane_wxyz"],

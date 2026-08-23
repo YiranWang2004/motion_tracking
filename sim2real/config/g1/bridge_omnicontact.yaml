@@ -37,7 +37,7 @@ torque_limits: [
 task_object:
   body_name: "box"
   geom_name: "box_geom"
-  initial_position: [1.0, 0.0, 0.15]
+  initial_position: [0.0, 0.7, 0.15]
 
 policy_joint_names: [
   "left_hip_pitch_joint", "right_hip_pitch_joint", "waist_yaw_joint",
@@ -75,7 +75,7 @@ home_q: [
 ]
 
 # The robot is initialized here on the ground. Pressing S releases the root.
-root_qpos_control: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
+root_qpos_control: [0.0, 0.0, 0.793, 0.7071068, 0.0, 0.0, 0.7071068]
 
 pre_control_marker:
   body_name: "mid360_link"

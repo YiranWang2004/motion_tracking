@@ -57,6 +57,7 @@ cover/
 
 # Django stuff:
 *.log
+/logs/omnicontact/
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
@@ -163,6 +164,7 @@ cython_debug/
 outputs/
 wandb/
 artifacts/
+/logs/
 
 # nohup
 *.out

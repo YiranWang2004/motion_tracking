@@ -240,6 +240,24 @@ LocoMode standing), then A while both Tracker poses are fresh (start
 carry-box). CFGen completion automatically returns to LocoMode standing. Stop
 sends damping.
 
+Both real-deployment processes persist a separate diagnostic log for every
+run under `<repository>/logs/omnicontact/`: `run_bridge.sh` writes a
+`bridge_*.log`, and `deploy_omnicontact.py` writes a `deploy_*.log`. The Python
+log includes accepted-A pose ages, CFGen/first-inference timings, command-gap
+telemetry, full fatal exception tracebacks, and every failsafe damping request.
+It also writes a same-stem `deploy_*.observations.npz` companion containing
+each exact 1244-D ONNX observation, the corresponding 5-by-141 policy history,
+Tracker poses/velocities/ages and valid/invalid counters, LowState joint/IMU
+values, policy actions, unclipped and safety-limited targets, gains, timings,
+and terminal fault events. The archive is written atomically even when a Python
+exception triggers the deployment failsafe. Load it with
+`numpy.load(path, allow_pickle=False)`; `schema_json`, `metadata_json`, joint
+names, and history slice labels are embedded in the file.
+Use `--log-file`/`--log-dir` for a custom deployment location or
+`G1_BRIDGE_LOG_FILE`/`G1_BRIDGE_LOG_DIR` for the bridge. File logging is on by
+default. Use `--history-file` to choose another archive path or
+`--no-history-file` to disable only the structured history.
+
 ## Remote Vive publisher mode
 
 Use the same random token on the workstation and policy host:
