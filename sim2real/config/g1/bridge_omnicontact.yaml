@@ -70,7 +70,12 @@ home_q: [
   0.0, 0.0
 ]
 
-# The simulator is suspended during the default-pose transition, then placed
-# at the nominal G1 pelvis height when A starts physics/control.
-root_qpos_home: [0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]
+# The robot remains at this grounded task pose before and after A.
 root_qpos_control: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
+
+pre_control_marker:
+  body_name: "mid360_link"
+  offset: [0.0, 0.0, 0.25]
+  radius: 0.055
+  half_length: 0.10
+  rgba: [1.0, 0.0, 0.0, 0.90]

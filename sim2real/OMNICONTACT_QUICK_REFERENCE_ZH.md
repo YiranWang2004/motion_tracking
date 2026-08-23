@@ -261,7 +261,7 @@ uv run src/deploy_omnicontact.py \
   --confirm-actuation ENABLE_MOTORS
 ```
 
-这里的 `--act` 只控制 MuJoCo，不连接实机。操作顺序：等待 `ZERO TORQUE` → MuJoCo 窗口按 `s` → 等待 `LocoMode standing` 并确认机器人稳定 → 按 `a` 启动 CFTrack → CFGen 结束后自动回到 LocoMode → 按 `x` 停止。
+这里的 `--act` 只控制 MuJoCo，不连接实机。机器人在按 `a` 前始终位于任务对应地面位置，头顶红色圆柱表示尚未进入策略。操作顺序：等待 `ZERO TORQUE` → MuJoCo 窗口按 `s` → 等待 `LocoMode standing` 并确认机器人稳定 → 按 `a`（红色圆柱消失）启动 CFTrack → CFGen 结束后自动回到 LocoMode → 按 `x` 停止。
 
 只运行策略评估、不发送仿真命令：
 

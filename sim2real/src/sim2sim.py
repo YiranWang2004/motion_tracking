@@ -55,6 +55,32 @@ def _as_vector(data, *, name: str, size: int | None = None, dtype=np.float64) ->
     return arr
 
 
+def _set_pre_control_marker_geometry(
+    scene,
+    *,
+    visible: bool,
+    position: np.ndarray,
+    radius: float,
+    half_length: float,
+    rgba: np.ndarray,
+) -> None:
+    """Draw the pre-A status marker in a viewer-owned, non-physical scene."""
+    scene.ngeom = 0
+    if not visible:
+        return
+    if scene.maxgeom < 1:
+        raise RuntimeError("MuJoCo user scene has no geometry capacity")
+    scene.ngeom = 1
+    mujoco.mjv_initGeom(
+        scene.geoms[0],
+        mujoco.mjtGeom.mjGEOM_CYLINDER,
+        np.array([radius, half_length, 0.0], dtype=np.float64),
+        np.asarray(position, dtype=np.float64),
+        np.eye(3, dtype=np.float64).reshape(-1),
+        np.asarray(rgba, dtype=np.float32),
+    )
+
+
 class Sim2Sim:
     def __init__(self, args, config):
         self.args = args
@@ -164,16 +190,49 @@ class Sim2Sim:
             name="home_q",
             size=self.n_policy_joints,
         )
-        self.root_qpos_home = _as_vector(
-            _cfg_value(config, "root_qpos_home", "root_qpos_home"),
-            name="root_qpos_home",
-            size=7,
-        )
         self.root_qpos_control = _as_vector(
             _cfg_value(config, "root_qpos_control", "root_qpos_control"),
             name="root_qpos_control",
             size=7,
         )
+        marker_cfg = _cfg_value(config, "pre_control_marker", "pre_control_marker")
+        marker_body_name = str(
+            _cfg_value(marker_cfg, "body_name", "pre_control_marker.body_name")
+        )
+        self.pre_control_marker_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, marker_body_name
+        )
+        if self.pre_control_marker_body_id < 0:
+            raise ValueError(
+                f"pre_control_marker body {marker_body_name!r} is missing "
+                "from the MuJoCo model"
+            )
+        self.pre_control_marker_offset = _as_vector(
+            _cfg_value(marker_cfg, "offset", "pre_control_marker.offset"),
+            name="pre_control_marker.offset",
+            size=3,
+        )
+        self.pre_control_marker_radius = float(
+            _cfg_value(marker_cfg, "radius", "pre_control_marker.radius")
+        )
+        self.pre_control_marker_half_length = float(
+            _cfg_value(marker_cfg, "half_length", "pre_control_marker.half_length")
+        )
+        self.pre_control_marker_rgba = _as_vector(
+            _cfg_value(marker_cfg, "rgba", "pre_control_marker.rgba"),
+            name="pre_control_marker.rgba",
+            size=4,
+            dtype=np.float32,
+        )
+        if (
+            self.pre_control_marker_radius <= 0.0
+            or self.pre_control_marker_half_length <= 0.0
+            or not np.all(np.isfinite(self.pre_control_marker_rgba))
+            or np.any(self.pre_control_marker_rgba < 0.0)
+            or np.any(self.pre_control_marker_rgba > 1.0)
+        ):
+            raise ValueError("pre_control_marker size and RGBA values are invalid")
+        self.pre_control_marker_visible = True
         self.viewer_fps = int(_cfg_value(config, "viewer_fps", "viewer_fps", 10))
         self.max_external_force = float(_cfg_value(config, "max_external_force", "max_external_force", 30.0))
         self.lockstep_policy = bool(
@@ -224,7 +283,9 @@ class Sim2Sim:
                 f"half_extents={self.task_object_half_extents.tolist()}"
             )
 
-        self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_home
+        self.data.qpos[
+            self.root_qpos_address : self.root_qpos_address + 7
+        ] = self.root_qpos_control
         self.data.qpos[self.mujoco_qpos_addresses] = self._policy_to_mujoco(self.home_q_policy)
         if self.task_object_initial_position is not None:
             assert self.task_object_qpos_address is not None
@@ -666,15 +727,21 @@ class Sim2Sim:
             self._publish_state()
             state_timer.sleep()
 
-    def simulate_gantry(self):
-        print('Moving to default pose...\nPress "a" after the robot is in default pose to begin control loop')
+    def simulate_pre_control(self):
+        print(
+            'Moving to default pose on the ground...\n'
+            'The red cylinder marks pre-control state; press "a" to begin '
+            "the control loop"
+        )
         timer = Timer(self.low_level_dt)
         while True:
             with self._cmd_lock:
                 ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
                 visualization = self._visualization_command
             with self._sim_lock:
-                self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_home
+                self.data.qpos[
+                    self.root_qpos_address : self.root_qpos_address + 7
+                ] = self.root_qpos_control
                 self.data.qvel[self.root_dof_address : self.root_dof_address + 6] = 0.0
                 self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
                 self.data.qvel[self.mujoco_dof_addresses] = 0.0
@@ -696,6 +763,7 @@ class Sim2Sim:
 
     def simulate_control(self):
         print("Running control loop...")
+        self.pre_control_marker_visible = False
         with self._sim_lock:
             self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_control
             mujoco.mj_forward(self.model, self.data)
@@ -791,6 +859,22 @@ class Sim2Sim:
             if force_magnitude > self.max_external_force:
                 self.data.xfrc_applied[i, :3] = force * (self.max_external_force / force_magnitude)
 
+    def _update_pre_control_marker(self) -> None:
+        if self.viewer is None:
+            return
+        position = (
+            self.data.xpos[self.pre_control_marker_body_id]
+            + self.pre_control_marker_offset
+        )
+        _set_pre_control_marker_geometry(
+            self.viewer.user_scn,
+            visible=self.pre_control_marker_visible,
+            position=position,
+            radius=self.pre_control_marker_radius,
+            half_length=self.pre_control_marker_half_length,
+            rgba=self.pre_control_marker_rgba,
+        )
+
     def _viewer_sync(self) -> bool:
         if self.viewer is None:
             return True
@@ -799,6 +883,7 @@ class Sim2Sim:
             return False
         self._viewer_tick += 1
         if (self._viewer_tick % self.viewer_decim) == 0:
+            self._update_pre_control_marker()
             self.viewer.sync()
         return True
 
@@ -815,13 +900,13 @@ class Sim2Sim:
                 self.viewer = viewer
                 try:
                     self.wait_for_high_cmd()
-                    self.simulate_gantry()
+                    self.simulate_pre_control()
                     self.simulate_control()
                 finally:
                     self.viewer = None
         else:
             self.wait_for_high_cmd()
-            self.simulate_gantry()
+            self.simulate_pre_control()
             self.simulate_control()
 
     def close(self, *args):

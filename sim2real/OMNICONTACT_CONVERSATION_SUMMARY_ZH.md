@@ -179,16 +179,22 @@ task_object:
   geom_name: "box_geom"
   initial_position: [1.0, 0.0, 0.15]
 
-root_qpos_home: [0.0, 0.0, 2.0, 1.0, 0.0, 0.0, 0.0]
 root_qpos_control: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
+
+pre_control_marker:
+  body_name: "mid360_link"
+  offset: [0.0, 0.0, 0.25]
+  radius: 0.055
+  half_length: 0.10
+  rgba: [1.0, 0.0, 0.0, 0.90]
 ```
 
 含义：
 
 - `task_object.initial_position` 是箱子初始中心位置；
 - 箱子姿态由场景中的 free joint 初始四元数决定，默认是单位姿态；
-- `root_qpos_home` 是机器人默认姿态过渡阶段的根部位姿；
-- `root_qpos_control` 是进入控制阶段后使用的机器人根部位姿；
+- `root_qpos_control` 是启动、默认姿态过渡和进入控制后共同使用的地面根部位姿；
+- `pre_control_marker` 是按下 A 之前显示在机器人头顶的红色圆柱，进入策略后隐藏；
 - `0.793 m` 是 sim2sim 中 G1 pelvis 的名义高度。
 
 sim2sim viewer 入口位于：

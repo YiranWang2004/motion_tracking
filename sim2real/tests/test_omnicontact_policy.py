@@ -29,6 +29,7 @@ from omnicontact.visualization_udp import (
 from deploy_omnicontact import _run_actuated
 from paths import SIM2REAL_ROOT
 from scripts import view_calibrated_omnicontact_poses as twin_viewer
+from sim2sim import _set_pre_control_marker_geometry
 
 
 class TestOmniContactPolicy(unittest.TestCase):
@@ -202,6 +203,61 @@ class TestOmniContactPolicy(unittest.TestCase):
             ),
             0,
         )
+
+    def test_all_sim_bridges_start_grounded_with_pre_control_marker(self):
+        for relative_config in (
+            "config/g1/bridge.yaml",
+            "config/g1/bridge_omnicontact.yaml",
+            "config/l7/bridge.yaml",
+        ):
+            with self.subTest(config=relative_config):
+                config_path = SIM2REAL_ROOT / relative_config
+                config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                self.assertNotIn("root_qpos_home", config)
+                root_pose = np.asarray(config["root_qpos_control"], dtype=np.float64)
+                self.assertLess(root_pose[2], 1.1)
+
+                model_path = (config_path.parent / config["xml_path"]).resolve()
+                model = mujoco.MjModel.from_xml_path(model_path.as_posix())
+                data = mujoco.MjData(model)
+                free_joint_ids = np.flatnonzero(
+                    model.jnt_type == mujoco.mjtJoint.mjJNT_FREE
+                )
+                self.assertGreater(len(free_joint_ids), 0)
+                root_address = int(model.jnt_qposadr[int(free_joint_ids[0])])
+                data.qpos[root_address : root_address + 7] = root_pose
+                mujoco.mj_forward(model, data)
+
+                marker = config["pre_control_marker"]
+                body_id = mujoco.mj_name2id(
+                    model, mujoco.mjtObj.mjOBJ_BODY, marker["body_name"]
+                )
+                self.assertGreaterEqual(body_id, 0)
+                expected_position = data.xpos[body_id] + np.asarray(marker["offset"])
+                scene = mujoco.MjvScene(model, maxgeom=2)
+                _set_pre_control_marker_geometry(
+                    scene,
+                    visible=True,
+                    position=expected_position,
+                    radius=float(marker["radius"]),
+                    half_length=float(marker["half_length"]),
+                    rgba=np.asarray(marker["rgba"], dtype=np.float32),
+                )
+                self.assertEqual(scene.ngeom, 1)
+                self.assertEqual(
+                    scene.geoms[0].type, mujoco.mjtGeom.mjGEOM_CYLINDER
+                )
+                np.testing.assert_allclose(scene.geoms[0].pos, expected_position)
+                np.testing.assert_allclose(scene.geoms[0].rgba, marker["rgba"])
+                _set_pre_control_marker_geometry(
+                    scene,
+                    visible=False,
+                    position=expected_position,
+                    radius=float(marker["radius"]),
+                    half_length=float(marker["half_length"]),
+                    rgba=np.asarray(marker["rgba"], dtype=np.float32),
+                )
+                self.assertEqual(scene.ngeom, 0)
 
     def test_sim2sim_scene_has_world_pelvis_and_box_coordinate_axes(self):
         scene_path = SIM2REAL_ROOT / "config/g1/assets/omnicontact_carry_box.xml"

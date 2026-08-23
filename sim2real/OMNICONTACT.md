@@ -77,13 +77,14 @@ Then operate in this order:
 
 1. Wait for terminal 2 to print `ZERO TORQUE`.
 2. In terminal 1 press `s`; the virtual robot is moved through the same
-   default-pose preparation state as real deployment.
+   default-pose preparation state as real deployment. It remains at the
+   grounded task pose, with a red cylinder above its head marking pre-control.
 3. Wait for terminal 2 to report that `LocoMode standing` is active. The
    recurrent zero-velocity locomotion policy now supports the robot, so the
    operator can release it before starting the task.
 4. In terminal 1 press `a`; CFgen creates the carry-box reference while
-   LocoMode remains active, then CFTrack control starts. A visible crouch
-   during grasping and placing is expected.
+   LocoMode remains active, then CFTrack control starts. The red cylinder
+   disappears. A visible crouch during grasping and placing is expected.
 5. When the CFGen trajectory completes, control automatically returns to
    LocoMode standing and remains there.
 6. In terminal 1 press `x` to request Stop/damping. Use `Ctrl+C` as the final
