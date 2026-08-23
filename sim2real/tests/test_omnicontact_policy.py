@@ -4,12 +4,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
 import yaml
 
 from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
+from omnicontact.loco_mode import LocoModePolicy
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
 from omnicontact.runtime import (
     BridgePoseProvider,
@@ -24,6 +26,7 @@ from omnicontact.visualization_udp import (
     decode_visualization,
     encode_visualization,
 )
+from deploy_omnicontact import _run_actuated
 from paths import SIM2REAL_ROOT
 from scripts import view_calibrated_omnicontact_poses as twin_viewer
 
@@ -38,9 +41,145 @@ class TestOmniContactPolicy(unittest.TestCase):
             SIM2REAL_ROOT / "config/g1/omnicontact",
             controller["policy_joint_names"],
         )
+        cls.loco_mode = LocoModePolicy(
+            SIM2REAL_ROOT / "config/g1/omnicontact",
+            controller["policy_joint_names"],
+        )
 
     def setUp(self):
         self.policy.reset()
+        self.loco_mode.reset()
+
+    def test_locomode_observation_and_recurrent_reset(self):
+        state = BridgeState(
+            q_lab=self.loco_mode.default_lab.copy(),
+            dq_lab=np.zeros(29, dtype=np.float32),
+            quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            gyro=np.zeros(3, dtype=np.float32),
+            buttons={},
+            state_receive_time_ns=123,
+            packet_seq=1,
+            packet_arrival_ns=456,
+        )
+        observation = self.loco_mode.build_observation(state)
+        self.assertEqual(observation.shape, (96,))
+        np.testing.assert_allclose(observation[:3], 0.0)
+        np.testing.assert_allclose(observation[3:6], [0.0, 0.0, -1.0])
+        np.testing.assert_allclose(observation[6:], 0.0)
+
+        first = self.loco_mode.compute(state)
+        second = self.loco_mode.compute(state)
+        self.assertEqual(first.target_pos.shape, (29,))
+        self.assertTrue(np.all(np.isfinite(first.target_pos)))
+        self.assertFalse(np.allclose(first.target_pos, second.target_pos))
+        self.loco_mode.reset()
+        repeated_first = self.loco_mode.compute(state)
+        np.testing.assert_allclose(repeated_first.target_pos, first.target_pos, atol=1e-6)
+
+    def test_completed_cfgen_switches_to_locomode(self):
+        def bridge_state(sequence: int, *, stop: bool = False) -> BridgeState:
+            return BridgeState(
+                q_lab=np.zeros(29, dtype=np.float32),
+                dq_lab=np.zeros(29, dtype=np.float32),
+                quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                gyro=np.zeros(3, dtype=np.float32),
+                buttons={"stop": stop},
+                state_receive_time_ns=sequence,
+                packet_seq=sequence,
+                packet_arrival_ns=sequence,
+            )
+
+        class FakeClient:
+            def __init__(self):
+                self.states = iter((bridge_state(2), bridge_state(3), bridge_state(4, stop=True)))
+                self.button_rise = {}
+                self.skipped_packets = 0
+                self.commands = []
+
+            def read_next(self, _timeout):
+                state = next(self.states)
+                self.button_rise = {"stop": state.buttons["stop"]}
+                return state
+
+            def send(self, command, **_kwargs):
+                self.commands.append(command)
+
+            def send_damping(self, _state):
+                raise AssertionError("unexpected damping")
+
+        class FakeTrackingPolicy:
+            kp_lab = np.ones(29, dtype=np.float32)
+            kd_lab = np.ones(29, dtype=np.float32)
+
+            def __init__(self):
+                self.advance_count = 0
+
+            def compute(self, *_args):
+                return SimpleNamespace(
+                    command=PDCommand(
+                        np.zeros(29, dtype=np.float32), self.kp_lab, self.kd_lab
+                    ),
+                    visualization=None,
+                    task_state="trajectory_complete",
+                )
+
+            def advance(self):
+                self.advance_count += 1
+
+            def should_replan(self, *_args):
+                raise AssertionError("completed trajectory must not replan")
+
+        class FakeLocoMode:
+            def __init__(self):
+                self.reset_count = 0
+                self.compute_count = 0
+
+            def reset(self):
+                self.reset_count += 1
+
+            def compute(self, _state):
+                self.compute_count += 1
+                return PDCommand(
+                    np.full(29, 0.1, dtype=np.float32),
+                    np.ones(29, dtype=np.float32),
+                    np.ones(29, dtype=np.float32),
+                )
+
+        stamp = time.monotonic()
+        provider = SimpleNamespace(
+            error=None,
+            get_poses=lambda: (
+                RobotPose([0, 0, 0.793], [0, 0, 0, 1], stamp),
+                ObjectPose([1, 0, 0.15], [0, 0, 0, 1], [0.15, 0.15, 0.15], stamp),
+            ),
+        )
+        client = FakeClient()
+        tracking = FakeTrackingPolicy()
+        loco_mode = FakeLocoMode()
+        limiter = CommandLimiter(
+            np.full(29, -10.0, dtype=np.float32),
+            np.full(29, 10.0, dtype=np.float32),
+            1.0,
+        )
+        final_state = _run_actuated(
+            client,
+            bridge_state(1),
+            provider,
+            tracking,
+            loco_mode,
+            TaskGoal([1, 1, 0.15]),
+            limiter,
+            pose_max_age_s=1.0,
+            min_pose_confidence=0.9,
+            state_timeout_s=1.0,
+            run_seconds=None,
+        )
+        self.assertEqual(final_state.packet_seq, 4)
+        self.assertEqual(tracking.advance_count, 1)
+        self.assertEqual(loco_mode.reset_count, 1)
+        self.assertEqual(loco_mode.compute_count, 1)
+        self.assertEqual(len(client.commands), 2)
+        np.testing.assert_allclose(client.commands[1].target_pos, 0.1)
 
     def test_carrybox_sim_scene_is_bundled_and_loadable(self):
         config_path = SIM2REAL_ROOT / "config/g1/bridge_omnicontact.yaml"
@@ -292,6 +431,7 @@ class TestOmniContactPolicy(unittest.TestCase):
         bridge_state = BridgeState(
             q_lab=self.policy.default_lab,
             dq_lab=np.zeros(29, dtype=np.float32),
+            quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
             gyro=np.zeros(3, dtype=np.float32),
             buttons={},
             state_receive_time_ns=123,

@@ -78,10 +78,15 @@ Then operate in this order:
 1. Wait for terminal 2 to print `ZERO TORQUE`.
 2. In terminal 1 press `s`; the virtual robot is moved through the same
    default-pose preparation state as real deployment.
-3. Wait for terminal 2 to print `Hold default pose`.
-4. In terminal 1 press `a`; CFgen creates the carry-box reference and policy
-   control starts. A visible crouch during grasping and placing is expected.
-5. In terminal 1 press `x` to request Stop/damping. Use `Ctrl+C` as the final
+3. Wait for terminal 2 to report that `LocoMode standing` is active. The
+   recurrent zero-velocity locomotion policy now supports the robot, so the
+   operator can release it before starting the task.
+4. In terminal 1 press `a`; CFgen creates the carry-box reference while
+   LocoMode remains active, then CFTrack control starts. A visible crouch
+   during grasping and placing is expected.
+5. When the CFGen trajectory completes, control automatically returns to
+   LocoMode standing and remains there.
+6. In terminal 1 press `x` to request Stop/damping. Use `Ctrl+C` as the final
    process stop if needed.
 
 The simulator publishes robot pelvis and box poses in the same state packet as
@@ -226,8 +231,10 @@ uv run --extra vive python src/deploy_omnicontact.py \
   --confirm-actuation ENABLE_MOTORS
 ```
 
-The remote sequence is Start (zero torque to default-pose transition), then A
-while both Tracker poses are fresh (start carry-box). Stop sends damping.
+The remote sequence is Start (zero torque to default-pose transition, then
+LocoMode standing), then A while both Tracker poses are fresh (start
+carry-box). CFGen completion automatically returns to LocoMode standing. Stop
+sends damping.
 
 ## Remote Vive publisher mode
 

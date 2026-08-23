@@ -15,6 +15,7 @@ import numpy as np
 import yaml
 
 from omnicontact.contracts import PDCommand, TaskGoal
+from omnicontact.loco_mode import LocoModePolicy
 from omnicontact.perception.pose_udp import UdpPoseReceiverProvider
 from omnicontact.perception.vive_pose import ViveDeploymentConfig, VivePoseProvider
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
@@ -233,6 +234,8 @@ def _plan_while_holding(
     client: MotionBridgeClient,
     state: BridgeState,
     policy: OmniContactCarryPolicy,
+    loco_mode: LocoModePolicy,
+    limiter: CommandLimiter,
     robot_pose,
     object_pose,
     goal: TaskGoal,
@@ -257,11 +260,7 @@ def _plan_while_holding(
         state = next_state
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
-        client.send(
-            PDCommand(policy.default_lab, policy.default_kp_lab, policy.default_kd_lab),
-            enable=1,
-            state=state,
-        )
+        client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
     worker.join()
     if error:
         raise RuntimeError(f"initial carry reference generation failed: {error[0]}") from error[0]
@@ -275,24 +274,27 @@ def _wait_for_task_start(
     state: BridgeState,
     provider,
     policy: OmniContactCarryPolicy,
+    loco_mode: LocoModePolicy,
+    limiter: CommandLimiter,
     goal: TaskGoal,
     *,
     pose_max_age_s: float,
     min_pose_confidence: float,
     state_timeout_s: float,
 ) -> BridgeState:
-    LOGGER.warning("Hold default pose; press A with fresh robot/object poses to start carry-box")
+    loco_mode.reset()
+    limiter.reset(state.q_lab)
+    LOGGER.warning(
+        "LocoMode standing active; release the robot, then press A with fresh "
+        "robot/object poses to start carry-box"
+    )
     last_pose_warning = 0.0
     while True:
         next_state = client.read_next(state_timeout_s)
         if next_state is None:
             raise RuntimeError("lost G1 bridge state while waiting for A")
         state = next_state
-        client.send(
-            PDCommand(policy.default_lab, policy.default_kp_lab, policy.default_kd_lab),
-            enable=1,
-            state=state,
-        )
+        client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
         if not client.button_rise.get("A", False):
@@ -312,6 +314,8 @@ def _wait_for_task_start(
             client,
             state,
             policy,
+            loco_mode,
+            limiter,
             robot_pose,
             object_pose,
             goal,
@@ -383,6 +387,7 @@ def _run_actuated(
     state: BridgeState,
     provider,
     policy: OmniContactCarryPolicy,
+    loco_mode: LocoModePolicy,
     goal: TaskGoal,
     limiter: CommandLimiter,
     *,
@@ -391,10 +396,12 @@ def _run_actuated(
     state_timeout_s: float,
     run_seconds: float | None,
 ) -> BridgeState:
-    limiter.reset(policy.default_lab)
+    limiter.reset(state.q_lab)
     start = time.monotonic()
     last_warning = 0.0
     last_log = start
+    mode = "tracking"
+    last_visualization = None
     while run_seconds is None or time.monotonic() - start < run_seconds:
         next_state = client.read_next(state_timeout_s)
         if next_state is None:
@@ -403,9 +410,27 @@ def _run_actuated(
         state = next_state
         if client.button_rise.get("stop", False):
             break
-        if provider.error is not None:
+        if mode == "tracking" and provider.error is not None:
             client.send_damping(state)
             raise RuntimeError(f"pose provider failed: {provider.error}") from provider.error
+
+        if mode == "standing":
+            safe_command = limiter.apply(loco_mode.compute(state))
+            client.send(
+                safe_command,
+                enable=1,
+                state=state,
+                visualization=last_visualization,
+            )
+            now = time.monotonic()
+            if now - last_log >= 1.0:
+                LOGGER.info(
+                    "state=loco_mode_standing skipped_state=%d target_abs_max=%.3f",
+                    client.skipped_packets,
+                    float(np.max(np.abs(safe_command.target_pos))),
+                )
+                last_log = now
+            continue
 
         robot_pose, object_pose, valid = _fresh_pair(
             provider,
@@ -425,6 +450,7 @@ def _run_actuated(
 
         step = policy.compute(_policy_state(state), robot_pose, object_pose)
         safe_command = limiter.apply(step.command)
+        last_visualization = step.visualization
         client.send(
             safe_command,
             enable=1,
@@ -432,7 +458,12 @@ def _run_actuated(
             visualization=step.visualization,
         )
         policy.advance()
-        if policy.should_replan(object_pose, goal):
+        if step.task_state == "trajectory_complete":
+            mode = "standing"
+            loco_mode.reset()
+            limiter.reset(safe_command.target_pos)
+            LOGGER.warning("CFGen trajectory complete; switched to LocoMode standing")
+        elif policy.should_replan(object_pose, goal):
             policy.request_replan(robot_pose, object_pose, goal)
 
         now = time.monotonic()
@@ -549,6 +580,10 @@ def main() -> int:
             list(controller_config["policy_joint_names"]),
             **policy_config,
         )
+        loco_mode = LocoModePolicy(
+            asset_dir,
+            list(controller_config["policy_joint_names"]),
+        )
         limiter = CommandLimiter(
             policy.lower_lab,
             policy.upper_lab,
@@ -590,6 +625,8 @@ def main() -> int:
             last_state,
             provider,
             policy,
+            loco_mode,
+            limiter,
             goal,
             pose_max_age_s=pose_max_age_s,
             min_pose_confidence=min_pose_confidence,
@@ -600,6 +637,7 @@ def main() -> int:
             last_state,
             provider,
             policy,
+            loco_mode,
             goal,
             limiter,
             pose_max_age_s=pose_max_age_s,

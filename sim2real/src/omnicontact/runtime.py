@@ -49,6 +49,7 @@ class BridgePoseProvider(ExternalObjectPoseProvider):
 class BridgeState:
     q_lab: np.ndarray
     dq_lab: np.ndarray
+    quat_wxyz: np.ndarray
     gyro: np.ndarray
     buttons: dict[str, bool]
     state_receive_time_ns: int | None
@@ -155,16 +156,21 @@ class MotionBridgeClient:
         data = packet.data
         q = np.asarray(data["q"], dtype=np.float32).reshape(-1)
         dq = np.asarray(data["dq"], dtype=np.float32).reshape(-1)
+        quat = np.asarray(data["quat_wxyz"], dtype=np.float32).reshape(-1)
         gyro = np.asarray(data["gyro"], dtype=np.float32).reshape(-1)
         if (
             q.shape != (29,)
             or dq.shape != (29,)
+            or quat.shape != (4,)
             or gyro.shape != (3,)
             or not np.all(np.isfinite(q))
             or not np.all(np.isfinite(dq))
+            or not np.all(np.isfinite(quat))
             or not np.all(np.isfinite(gyro))
+            or float(np.linalg.norm(quat)) < 1e-6
         ):
             raise RuntimeError("bridge returned an invalid G1 state")
+        quat = quat / np.linalg.norm(quat)
         if self.pose_sink is not None:
             self._publish_sim_pose(data)
         raw_buttons = data.get("buttons", {})
@@ -184,6 +190,7 @@ class MotionBridgeClient:
         return BridgeState(
             q_lab=q.copy(),
             dq_lab=dq.copy(),
+            quat_wxyz=quat.copy(),
             gyro=gyro.copy(),
             buttons=buttons,
             state_receive_time_ns=None if state_time is None else int(state_time),

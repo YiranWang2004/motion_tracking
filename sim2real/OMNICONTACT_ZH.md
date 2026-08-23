@@ -152,10 +152,12 @@ uv run src/deploy_omnicontact.py \
 
 1. 等待控制器打印 `ZERO TORQUE`。
 2. 让 MuJoCo 窗口保持焦点，按 `s`，进入默认姿态过渡。
-3. 等待控制器打印 `Hold default pose`。
+3. 等待控制器提示 `LocoMode standing` 已启动；此时由原版零速度 LocoMode
+   持续站立，操作员可先释放机器人。
 4. 在 MuJoCo 窗口按 `a`，生成 carry-box 参考并开始策略控制。
 5. 搬运过程中可以看到下蹲、抓取和放置动作，这是预期行为。
-6. 按 `x` 请求停止，控制器发送阻尼命令；需要完全退出时再按 `Ctrl+C`。
+6. CFGen 轨迹结束后会自动回到 LocoMode，并持续站立。
+7. 按 `x` 请求停止，控制器发送阻尼命令；需要完全退出时再按 `Ctrl+C`。
 
 仿真按键映射为：
 
