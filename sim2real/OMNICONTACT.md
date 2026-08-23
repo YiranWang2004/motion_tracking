@@ -142,6 +142,52 @@ The checked-in G1 bridge configuration enables a 200 ms command watchdog.
 After its first valid command, a timeout sends damping and latches the bridge;
 restart the bridge to re-arm it.
 
+## Run the read-only sim2real twin
+
+Run the twin as a separate process on the SteamVR workstation. Do not put
+MuJoCo or OpenVR in `run_bridge.sh`: the C++ bridge's DDS and watchdog timing
+must not depend on a GUI process.
+
+With the checked-in local port layout, use three terminals:
+
+```bash
+# Terminal 1: real-time G1 bridge
+cd <repo>/g1_sim2real
+G1_NET=<WIRED_INTERFACE> bash scripts/run_bridge.sh
+
+# Terminal 2: read-only MuJoCo twin
+cd <repo>/sim2real
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json
+
+# Terminal 3: policy deployment (start observation-only first)
+cd <repo>/sim2real
+uv run --extra vive python src/deploy_omnicontact.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --pose-source local \
+  --run-seconds 30
+```
+
+The window combines three independent read-only inputs in the same carry-box
+XML used by sim2sim:
+
+- local Vive poses drive the real pelvis, real box and Tracker markers;
+- bridge mirror UDP `55003` drives the real robot's 29 measured joints;
+- deployment UDP `55004` drives CFgen wrist/torso/ankle references, ghost
+  robot, ghost box, contacts, and start/goal planes.
+
+The deployment process still uses bridge state `55001` and sends motor commands
+only to `55002`. Closing or stalling the twin cannot enter that command path.
+Reference and ghost geometry is hidden if the `55004` stream is stale (default
+`0.5` s). `--state-port 0` disables measured joints;
+`--no-visualization` disables the policy overlay.
+
+If the twin runs on another computer, set `udp.state_mirror_host` in
+`g1_sim2real/config/g1_bridge.yaml` to that computer's wired IP, and pass the
+same IP to deployment with `--visualization-host`. Bind the twin receivers with
+`--state-host 0.0.0.0 --visualization-host 0.0.0.0`. `G1_NET` selects only the
+Unitree DDS interface; it does not route these viewer streams.
+
 ## Local OpenVR mode
 
 First run observation-only:

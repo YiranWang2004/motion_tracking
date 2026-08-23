@@ -47,7 +47,8 @@ def _viewer_xml() -> str:
     vertices = _pyramid_vertices(PYRAMID_SIDE_M, PYRAMID_HEIGHT_M)
     # The base and three side faces form a triangular pyramid.  The two mesh
     # copies allow the viewer to use different colors for the two Trackers.
-    faces = "0 2 1  0 1 3  1 2 3  2 0 3"
+    # Counter-clockwise when viewed from outside; MuJoCo culls backfaces.
+    faces = "0 1 2  0 3 1  1 3 2  2 3 0"
     return f"""
 <mujoco model="raw_tracker_pose_viewer">
   <compiler angle="radian" coordinate="local"/>

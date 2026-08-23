@@ -253,6 +253,23 @@ class MotionBridgeClient:
             payload["ghost_dof_pos"] = visualization.ghost_dof_pos
         return payload
 
+    def publish_visualization(
+        self,
+        visualization: ReferenceVisualization | None = None,
+    ) -> None:
+        """Publish the read-only twin stream without sending a robot command."""
+        visualization_sender = getattr(self, "visualization_sender", None)
+        if visualization_sender is None or (
+            self._carrybox_scene is None and visualization is None
+        ):
+            return
+        reference_payload = (
+            None
+            if visualization is None
+            else self._reference_visualization_payload(visualization)
+        )
+        visualization_sender.send(self._carrybox_scene, reference_payload)
+
     def send(
         self,
         command: PDCommand,
@@ -274,16 +291,7 @@ class MotionBridgeClient:
                     visualization
                 )
             extra_command = {"omnicontact_visualization": omni_visualization}
-        visualization_sender = getattr(self, "visualization_sender", None)
-        if visualization_sender is not None and (
-            self._carrybox_scene is not None or visualization is not None
-        ):
-            reference_payload = (
-                None
-                if visualization is None
-                else self._reference_visualization_payload(visualization)
-            )
-            visualization_sender.send(self._carrybox_scene, reference_payload)
+        self.publish_visualization(visualization)
         return self.transport.send_command(
             q_des=command.target_pos,
             qd_des=zeros,

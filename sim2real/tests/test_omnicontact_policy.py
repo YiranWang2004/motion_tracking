@@ -1,3 +1,5 @@
+import socket
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -15,8 +17,14 @@ from omnicontact.runtime import (
     MotionBridgeClient,
     pose_pair_is_valid,
 )
-from omnicontact.visualization_udp import decode_visualization, encode_visualization
+from omnicontact.visualization_udp import (
+    VisualizationReceiver,
+    VisualizationSender,
+    decode_visualization,
+    encode_visualization,
+)
 from paths import SIM2REAL_ROOT
+from scripts import view_calibrated_omnicontact_poses as twin_viewer
 
 
 class TestOmniContactPolicy(unittest.TestCase):
@@ -302,8 +310,205 @@ class TestOmniContactPolicy(unittest.TestCase):
         packet = encode_visualization(scene, reference)
         decoded = decode_visualization(packet)
         self.assertIsNotNone(decoded)
-        np.testing.assert_allclose(decoded["scene"]["goal_plane_wxyz"], scene["goal_plane_wxyz"])
-        np.testing.assert_allclose(decoded["reference"]["ghost_dof_pos"], reference["ghost_dof_pos"])
+        np.testing.assert_allclose(
+            decoded["scene"]["goal_plane_wxyz"], scene["goal_plane_wxyz"]
+        )
+        np.testing.assert_allclose(
+            decoded["reference"]["ghost_dof_pos"], reference["ghost_dof_pos"]
+        )
+
+    def test_read_only_visualization_udp_sender_receiver(self):
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+        probe.close()
+
+        receiver = VisualizationReceiver("127.0.0.1", port)
+        sender = VisualizationSender("127.0.0.1", port)
+        receiver.start()
+        try:
+            sender.send(
+                {
+                    "start_plane_wxyz": np.arange(7, dtype=np.float32),
+                    "goal_plane_wxyz": np.arange(7, dtype=np.float32) + 1,
+                },
+                None,
+            )
+            deadline = time.monotonic() + 1.0
+            packet = None
+            while packet is None and time.monotonic() < deadline:
+                packet = receiver.read_latest()
+                if packet is None:
+                    time.sleep(0.01)
+            self.assertIsNotNone(packet)
+            np.testing.assert_allclose(
+                packet["scene"]["goal_plane_wxyz"],
+                np.arange(7, dtype=np.float32) + 1,
+            )
+        finally:
+            sender.close()
+            receiver.close()
+
+    def test_read_only_visualization_does_not_require_sim_pose_sink(self):
+        class FakeVisualizationSender:
+            def __init__(self):
+                self.calls = []
+
+            def send(self, scene, reference):
+                self.calls.append((scene, reference))
+
+        stamp = time.monotonic()
+        robot = RobotPose([0, 0, 0.793], [0, 0, 0, 1], stamp)
+        obj = ObjectPose([1, 0, 0.15], [0, 0, 0, 1], [0.15, 0.15, 0.15], stamp)
+        goal = TaskGoal([1, 1, 0.15])
+        self.policy.initialize_reference(robot, obj, goal)
+        state = RobotPolicyState(
+            self.policy.default_lab,
+            np.zeros(29, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+        )
+        step = self.policy.compute(state, robot, obj)
+
+        client = MotionBridgeClient.__new__(MotionBridgeClient)
+        client.pose_sink = None
+        client.visualization_sender = FakeVisualizationSender()
+        client._carrybox_scene = None
+        client.set_carrybox_scene(obj, goal)
+        client.publish_visualization(step.visualization)
+
+        self.assertEqual(len(client.visualization_sender.calls), 1)
+        scene, reference = client.visualization_sender.calls[0]
+        self.assertEqual(scene["start_plane_wxyz"].shape, (7,))
+        self.assertEqual(reference["ghost_dof_pos"].shape, (29,))
+
+    def test_sim2real_twin_scene_maps_complete_visualization(self):
+        scene_path = SIM2REAL_ROOT / "config/g1/assets/omnicontact_carry_box.xml"
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".xml",
+            dir=scene_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as stream:
+            stream.write(twin_viewer._expanded_xml(scene_path))
+            expanded_path = Path(stream.name)
+        try:
+            model = mujoco.MjModel.from_xml_path(expanded_path.as_posix())
+        finally:
+            expanded_path.unlink()
+        data = mujoco.MjData(model)
+        _, _, ghost_joint_qpos = twin_viewer._load_joint_setup(
+            model, SIM2REAL_ROOT / "config/g1"
+        )
+        ghost_object_qpos = twin_viewer._qpos_addr(model, "ghost_box_joint")
+        ghost_robot_qpos = twin_viewer._qpos_addr(
+            model, "ghost_floating_base_joint"
+        )
+        body_names = {
+            "start_plane_wxyz": "plane_1_holder",
+            "goal_plane_wxyz": "plane_2_holder",
+            "left_wrist_wxyz": "ref_l_wrist_frame",
+            "right_wrist_wxyz": "ref_r_wrist_frame",
+            "torso_wxyz": "ref_torso_frame",
+            "left_ankle_wxyz": "ref_l_ankle_frame",
+            "right_ankle_wxyz": "ref_r_ankle_frame",
+        }
+        visual_mocap_ids = {
+            key: int(
+                model.body_mocapid[
+                    mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, value)
+                ]
+            )
+            for key, value in body_names.items()
+        }
+        self.assertTrue(
+            all(mocap_id >= 0 for mocap_id in visual_mocap_ids.values())
+        )
+        contact_geom_ids = np.asarray(
+            [
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+                for name in (
+                    "ref_l_ankle_mesh",
+                    "ref_r_ankle_mesh",
+                    "ref_l_rubber_hand",
+                    "ref_r_rubber_hand",
+                )
+            ],
+            dtype=int,
+        )
+        reference_alpha = twin_viewer._reference_visual_alpha(model)
+        twin_viewer._set_reference_visibility(model, reference_alpha, False)
+
+        identity_pose = np.array([1, 2, 3, 1, 0, 0, 0], dtype=np.float32)
+        visualization = {
+            "scene": {
+                "start_plane_wxyz": identity_pose,
+                "goal_plane_wxyz": identity_pose + np.array(
+                    [1, 0, 0, 0, 0, 0, 0], dtype=np.float32
+                ),
+            },
+            "reference": {
+                name: identity_pose.copy()
+                for name in (
+                    "left_wrist_wxyz",
+                    "right_wrist_wxyz",
+                    "torso_wxyz",
+                    "left_ankle_wxyz",
+                    "right_ankle_wxyz",
+                    "object_wxyz",
+                    "ghost_base_wxyz",
+                )
+            },
+        }
+        visualization["reference"]["contact"] = np.array(
+            [0, 1, 0, 1], dtype=np.float32
+        )
+        visualization["reference"]["ghost_dof_pos"] = np.arange(
+            29, dtype=np.float32
+        )
+        twin_viewer._apply_visualization(
+            model,
+            data,
+            visualization,
+            visual_mocap_ids,
+            ghost_object_qpos,
+            ghost_robot_qpos,
+            ghost_joint_qpos,
+            reference_alpha,
+            contact_geom_ids,
+        )
+
+        np.testing.assert_allclose(
+            data.qpos[ghost_object_qpos : ghost_object_qpos + 7], identity_pose
+        )
+        np.testing.assert_allclose(
+            data.qpos[ghost_robot_qpos : ghost_robot_qpos + 7], identity_pose
+        )
+        np.testing.assert_allclose(data.qpos[ghost_joint_qpos], np.arange(29))
+        self.assertTrue(
+            all(model.geom_rgba[index, 3] > 0 for index in reference_alpha)
+        )
+        twin_viewer._set_reference_visibility(model, reference_alpha, False)
+        self.assertTrue(
+            all(model.geom_rgba[index, 3] == 0 for index in reference_alpha)
+        )
+
+    def test_tracker_pyramid_faces_point_outward(self):
+        vertices = np.fromstring(
+            twin_viewer._pyramid_vertices(), sep=" ", dtype=np.float64
+        ).reshape(-1, 3)
+        faces = np.fromstring(
+            twin_viewer._pyramid_faces(), sep=" ", dtype=np.int64
+        ).reshape(-1, 3)
+        solid_center = np.mean(vertices, axis=0)
+        self.assertEqual(faces.shape, (4, 3))
+        for face in faces:
+            triangle = vertices[face]
+            normal = np.cross(
+                triangle[1] - triangle[0], triangle[2] - triangle[0]
+            )
+            outward = np.mean(triangle, axis=0) - solid_center
+            self.assertGreater(float(np.dot(normal, outward)), 0.0)
 
 
 if __name__ == "__main__":

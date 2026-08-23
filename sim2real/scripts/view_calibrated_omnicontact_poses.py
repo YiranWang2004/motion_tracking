@@ -4,7 +4,8 @@
 The script loads the same carry-box XML used by ``sim2sim.py`` and overlays
 the world, pelvis, box, and both Tracker coordinate frames.  Vive data is
 transformed with the deployment calibration, while no command packet is sent.
-Robot joints use OmniContact's default pose unless ``--state-port`` is given.
+Robot joints use the bridge's read-only state mirror by default and retain the
+OmniContact default pose until the first state packet arrives.
 """
 
 from __future__ import annotations
@@ -50,6 +51,12 @@ def _pyramid_vertices() -> str:
     return " ".join(f"{v:.9g}" for point in vertices for v in point)
 
 
+def _pyramid_faces() -> str:
+    # Counter-clockwise when viewed from outside. MuJoCo culls backfaces, so
+    # inward-facing winding makes parts of this closed marker disappear.
+    return "0 1 2  0 3 1  1 3 2  2 3 0"
+
+
 def _axis_geoms(prefix: str) -> str:
     return f'''\
       <geom name="{prefix}_axis_x" type="capsule" fromto="0 0 0 {AXIS_LENGTH} 0 0" size="{AXIS_RADIUS}" contype="0" conaffinity="0" rgba="0.95 0.08 0.08 1"/>
@@ -61,7 +68,7 @@ def _expanded_xml(xml_path: Path) -> str:
     """Inject marker assets/bodies without modifying the repository XML."""
     source = xml_path.read_text(encoding="utf-8")
     assets = f'''\
-        <mesh name="calib_tracker_pyramid" vertex="{_pyramid_vertices()}" face="0 2 1 0 1 3 1 2 3 2 0 3"/>
+        <mesh name="calib_tracker_pyramid" vertex="{_pyramid_vertices()}" face="{_pyramid_faces()}"/>
         <material name="calib_tracker_robot" rgba="0.10 0.45 1 1"/>
         <material name="calib_tracker_object" rgba="1 0.35 0.06 1"/>'''
     source = source.replace("    </asset>", assets + "\n    </asset>", 1)
@@ -155,15 +162,23 @@ def _set_freejoint_pose(data: mujoco.MjData, address: int, pose: np.ndarray) -> 
     data.qpos[address : address + 7] = pose
 
 
-def _hide_reference_visuals(model: mujoco.MjModel) -> dict[int, float]:
-    hidden: dict[int, float] = {}
+def _reference_visual_alpha(model: mujoco.MjModel) -> dict[int, float]:
+    alpha_by_geom: dict[int, float] = {}
     for geom_id in range(model.ngeom):
         body_id = int(model.geom_bodyid[geom_id])
         body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id)
         if body_name and (body_name.startswith("ref_") or body_name.startswith("ghost_")):
-            hidden[geom_id] = float(model.geom_rgba[geom_id, 3])
-            model.geom_rgba[geom_id, 3] = 0.0
-    return hidden
+            alpha_by_geom[geom_id] = float(model.geom_rgba[geom_id, 3])
+    return alpha_by_geom
+
+
+def _set_reference_visibility(
+    model: mujoco.MjModel,
+    alpha_by_geom: dict[int, float],
+    visible: bool,
+) -> None:
+    for geom_id, alpha in alpha_by_geom.items():
+        model.geom_rgba[geom_id, 3] = alpha if visible else 0.0
 
 
 def _apply_visualization(
@@ -174,7 +189,7 @@ def _apply_visualization(
     ghost_object_qpos: int,
     ghost_robot_qpos: int,
     ghost_joint_qpos: np.ndarray,
-    hidden_alpha: dict[int, float],
+    reference_alpha: dict[int, float],
     contact_geom_ids: np.ndarray,
 ) -> None:
     scene = visualization.get("scene")
@@ -186,8 +201,7 @@ def _apply_visualization(
     reference = visualization.get("reference")
     if not isinstance(reference, dict):
         return
-    for geom_id, alpha in hidden_alpha.items():
-        model.geom_rgba[geom_id, 3] = alpha
+    _set_reference_visibility(model, reference_alpha, True)
     for name in (
         "left_wrist_wxyz", "right_wrist_wxyz", "torso_wxyz",
         "left_ankle_wxyz", "right_ankle_wxyz",
@@ -247,6 +261,12 @@ def _args(argv: list[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.fps <= 0 or args.stale_timeout <= 0:
         parser.error("--fps and --stale-timeout must be positive")
+    for name in ("state_port", "visualization_port"):
+        port = int(getattr(args, name))
+        if not 0 <= port <= 65535:
+            parser.error(f"--{name.replace('_', '-')} must be in [0, 65535]")
+    if not args.no_visualization and args.visualization_port == 0:
+        parser.error("--visualization-port must be non-zero unless --no-visualization is used")
     return args
 
 
@@ -327,7 +347,8 @@ def main(argv: list[str] | None = None) -> int:
             ],
             dtype=int,
         )
-        hidden_alpha = _hide_reference_visuals(model)
+        reference_alpha = _reference_visual_alpha(model)
+        _set_reference_visibility(model, reference_alpha, False)
         data.qpos[joint_addr] = default_angles
         if args.no_robot:
             _set_robot_visibility(model, False)
@@ -339,7 +360,7 @@ def main(argv: list[str] | None = None) -> int:
         frame_period = 1.0 / args.fps
         last_state_seq = None
         last_visual_seq = None
-        last_visual_time = 0.0
+        last_reference_time = 0.0
         with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
             viewer.cam.lookat[:] = (0.8, 0.0, 0.8)
             viewer.cam.distance = 3.0
@@ -381,18 +402,17 @@ def main(argv: list[str] | None = None) -> int:
                             ghost_object_qpos,
                             ghost_robot_qpos,
                             ghost_joint_addr,
-                            hidden_alpha,
+                            reference_alpha,
                             contact_geom_ids,
                         )
                         last_visual_seq = packet.seq
-                        last_visual_time = started
+                        if isinstance(visualization.get("reference"), dict):
+                            last_reference_time = started
                 if (
-                    last_visual_time > 0.0
-                    and started - last_visual_time > args.stale_timeout
+                    last_reference_time > 0.0
+                    and started - last_reference_time > args.stale_timeout
                 ):
-                    # Keep the last pose visible, but avoid presenting stale
-                    # reference geometry as a live policy update.
-                    pass
+                    _set_reference_visibility(model, reference_alpha, False)
                 mujoco.mj_forward(model, data)
                 viewer.sync()
                 delay = frame_period - (time.monotonic() - started)

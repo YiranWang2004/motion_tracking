@@ -356,6 +356,7 @@ def _run_no_actuation(
         )
         if valid:
             result = policy.compute(_policy_state(state), robot_pose, object_pose)
+            client.publish_visualization(result.visualization)
             policy.advance()
             valid_steps += 1
             if policy.should_replan(object_pose, goal):
@@ -622,6 +623,10 @@ def main() -> int:
                 LOGGER.exception("failed to send final damping command")
         if client is not None:
             client.close()
+        elif visualization_sender is not None:
+            # MotionBridgeClient normally owns the sender after construction.
+            # Close it here when startup failed before ownership transferred.
+            visualization_sender.close()
         provider.stop()
         if policy is not None:
             policy.close()

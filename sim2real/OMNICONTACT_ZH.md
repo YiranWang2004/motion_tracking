@@ -632,38 +632,79 @@ robot=valid, object=valid
 
 该工具只做可视化，不连接 G1 bridge，也不会发送任何机器人命令。
 
-### 标定世界系综合可视化
+### 标定世界系与 sim2real 仿真孪生
 
 使用下面的测试脚本可以直接打开与 sim2sim 相同的 MuJoCo 搬箱场景，并实时显示：
 
 - 标定世界系中的 G1（pelvis 位姿来自 robot Tracker，关节默认使用 `OmniContact.yaml` 的 `default_angles_lab`）；
 - 标定世界系中的箱子；
 - robot/object 两个 Tracker 的 10 cm 三棱锥及其局部坐标轴；
-- 世界原点、pelvis 和箱子坐标轴。坐标轴颜色约定为 X 红、Y 绿、Z 蓝。
+- 世界原点、pelvis 和箱子坐标轴；
+- G1 bridge 镜像的 29 个实测关节；
+- 策略生成的 wrist/torso/ankle reference、ghost robot、ghost box、接触状态和起终点平面。
+
+坐标轴颜色约定为 X 红、Y 绿、Z 蓝。孪生窗口是独立只读进程，不应放进
+`run_bridge.sh`；MuJoCo/OpenVR 窗口关闭或阻塞不会进入电机命令链路。
 
 脚本只在运行目录生成临时 XML，不修改 `assets/omnicontact_carry_box.xml`，也不发送控制命令：
 
 ```bash
 cd <repo>/motion_tracking/sim2real
-uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
   --vive-config config/g1/omnicontact_vive.json
 ```
+
+默认端口关系为：bridge 状态 `55001` 给 deploy，电机命令 `55002` 给 bridge，
+只读状态镜像 `55003` 给孪生窗口，策略 reference/ghost `55004` 给孪生窗口。
+完整启动顺序如下：
+
+```bash
+# 终端 1
+cd <repo>/motion_tracking/g1_sim2real
+G1_NET=<有线网卡> bash scripts/run_bridge.sh
+
+# 终端 2
+cd <repo>/motion_tracking/sim2real
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json
+
+# 终端 3：先无电机输出观察
+cd <repo>/motion_tracking/sim2real
+uv run --extra vive python src/deploy_omnicontact.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --pose-source local --run-seconds 30
+```
+
+确认坐标、关节和 ghost 对齐后，才在终端 3 加
+`--act --confirm-actuation ENABLE_MOTORS`。无电机输出模式也会发布只读
+reference/ghost，因此可以先完整检查孪生显示。
 
 如果配置仍处于编辑阶段、`calibration_confirmed` 尚未改成 `true`，可以显式允许只读预览（不会写回配置）：
 
 ```bash
-uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
   --vive-config config/g1/omnicontact_vive.json --allow-unconfirmed
 ```
 
-需要叠加 G1 bridge 发布的实时 29 关节时，加上状态 UDP 端口；根部平移和姿态仍以 robot Tracker 标定结果为准：
+默认已经从 bridge 的只读镜像端口 `55003` 叠加实时 29 关节；根部平移和姿态仍以 robot Tracker 标定结果为准：
 
 ```bash
-uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
-  --vive-config config/g1/omnicontact_vive.json --state-host 127.0.0.1 --state-port 55001
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --state-host 127.0.0.1 --state-port 55003 \
+  --visualization-host 127.0.0.1 --visualization-port 55004
 ```
 
-`--no-robot` 可隐藏 G1 网格，只观察箱子、Tracker 和坐标系；`--fps` 控制 viewer 刷新频率。相机只在启动时设定一次，不会锁定或跟随 Tracker 的平移。
+`--state-port 0` 可关闭实测关节，`--no-visualization` 可关闭策略叠加，
+`--no-robot` 可隐藏 G1 网格。reference/ghost 数据超过 `--stale-timeout`
+（默认 0.5 秒）未更新时会自动隐藏，避免把过期姿态误认为实时输出。
+`--fps` 控制 viewer 刷新频率。相机只在启动时设定一次，不会锁定或跟随 Tracker 的平移。
+
+如果孪生窗口在另一台电脑，把 `g1_sim2real/config/g1_bridge.yaml` 中的
+`state_mirror_host` 改成 viewer 电脑的有线 IP，并给 deploy 加
+`--visualization-host <VIEWER_IP>`；viewer 使用
+`--state-host 0.0.0.0 --visualization-host 0.0.0.0`。`G1_NET` 只选择 Unitree
+DDS 网卡，不决定 viewer 的 UDP 路由。
 
 ```bash
 cd <repo>/motion_tracking/sim2real
