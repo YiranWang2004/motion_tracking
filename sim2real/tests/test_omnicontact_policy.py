@@ -64,6 +64,31 @@ class TestOmniContactPolicy(unittest.TestCase):
             0,
         )
 
+    def test_sim2sim_scene_has_world_pelvis_and_box_coordinate_axes(self):
+        scene_path = SIM2REAL_ROOT / "config/g1/assets/omnicontact_carry_box.xml"
+        model = mujoco.MjModel.from_xml_path(scene_path.as_posix())
+        expected_parent = {
+            "world_frame": 0,
+            "pelvis_frame": mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY, "pelvis"
+            ),
+            "box_frame": mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_BODY, "box"
+            ),
+        }
+        for prefix, body_id in expected_parent.items():
+            self.assertGreaterEqual(body_id, 0)
+            for suffix in ("origin", "axis_x", "axis_y", "axis_z"):
+                geom_id = mujoco.mj_name2id(
+                    model,
+                    mujoco.mjtObj.mjOBJ_GEOM,
+                    f"{prefix}_{suffix}",
+                )
+                self.assertGreaterEqual(geom_id, 0)
+                self.assertEqual(int(model.geom_bodyid[geom_id]), body_id)
+                self.assertEqual(int(model.geom_contype[geom_id]), 0)
+                self.assertEqual(int(model.geom_conaffinity[geom_id]), 0)
+
     def test_joint_permutations_are_inverse_and_match_controller_order(self):
         values = np.arange(29, dtype=np.float32)
         np.testing.assert_array_equal(

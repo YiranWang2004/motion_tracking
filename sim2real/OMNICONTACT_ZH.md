@@ -1,5 +1,7 @@
 # OmniContact 搬箱任务：sim2sim 与 sim2real
 
+命令速查：[OMNICONTACT_QUICK_REFERENCE_ZH.md](OMNICONTACT_QUICK_REFERENCE_ZH.md)
+
 本文说明当前仓库中 OmniContact `carrybox` 任务的安装、仿真、实机运行、Vive 标定和故障安全行为。
 
 本文档对应当前仓库结构。OmniContact 的 MuJoCo 搬箱场景已经随仓库提交，位于 `config/g1/assets/omnicontact_carry_box.xml`，不需要再准备外部 `OmniContact_sim2sim` 仓库。
@@ -71,6 +73,9 @@ config/g1/bridge_omnicontact.yaml
 ```text
 config/g1/assets/omnicontact_carry_box.xml
 ```
+
+sim2sim 窗口默认显示任务世界、G1 pelvis 和箱子三个坐标系的正方向轴：
+X 红、Y 绿、Z 蓝。pelvis 和箱子坐标轴直接挂在对应刚体上，会随仿真运动。
 
 该 XML 所需的机器人、ghost 和 mesh 文件也都在 `config/g1/assets/` 下。当前版本不需要 sibling `OmniContact_sim2sim` checkout。
 
