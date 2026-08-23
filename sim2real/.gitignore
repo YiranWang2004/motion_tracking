@@ -15,4 +15,4 @@
 /tools
 /teleop/debs
 /config/*/ckpts
-/config/*/motions
+# /config/*/motions
