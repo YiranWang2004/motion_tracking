@@ -299,7 +299,6 @@ class Sim2Sim:
         self._kp_policy = np.zeros(self.n_policy_joints, dtype=np.float64)
         self._kd_policy = np.zeros(self.n_policy_joints, dtype=np.float64)
         self._have_command = False
-        self._have_tracking_target = False
         self._buttons = {k: False for k in BUTTON_KEYS}
         self._visualization_command: dict | None = None
         self._init_omnicontact_visualization()
@@ -323,7 +322,6 @@ class Sim2Sim:
             daemon=False,
         )
         self.is_alive = True
-        self.policy_queried = False
 
         self.render_gui = bool(config.render_gui) and not bool(args.headless)
         self.viewer = None
@@ -556,7 +554,6 @@ class Sim2Sim:
         )
         kp = np.asarray(payload.get("kp", np.zeros(self.n_policy_joints, dtype=np.float32)), dtype=np.float64)
         kd = np.asarray(payload.get("kd", np.zeros(self.n_policy_joints, dtype=np.float32)), dtype=np.float64)
-        enable = int(payload.get("enable", 0))
         if q_des.size != self.n_policy_joints or kp.size != self.n_policy_joints or kd.size != self.n_policy_joints:
             print(f"{self.log_prefix} Ignore UDP command with unexpected DOF size")
             return
@@ -576,7 +573,6 @@ class Sim2Sim:
                 self._last_command_state_time_ns = int(command_state_time)
             self._cmd_condition.notify_all()
         self._record_policy_delay(payload)
-        self.policy_queried |= bool(enable)
         self._have_command = True
 
     def _record_policy_delay(self, payload):
@@ -727,61 +723,18 @@ class Sim2Sim:
             self._publish_state()
             state_timer.sleep()
 
-    def simulate_pre_control(self):
-        print(
-            'Moving to default pose on the ground...\n'
-            'The red cylinder marks pre-control state; press "a" to begin '
-            "the control loop"
-        )
-        timer = Timer(self.low_level_dt)
-        while True:
-            with self._cmd_lock:
-                ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
-                visualization = self._visualization_command
-            with self._sim_lock:
-                self.data.qpos[
-                    self.root_qpos_address : self.root_qpos_address + 7
-                ] = self.root_qpos_control
-                self.data.qvel[self.root_dof_address : self.root_dof_address + 6] = 0.0
-                self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
-                self.data.qvel[self.mujoco_dof_addresses] = 0.0
-                self.data.ctrl[:] = 0.0
-                self._apply_visualization_locked(visualization)
-                mujoco.mj_forward(self.model, self.data)
-
-            if not self._viewer_sync():
-                break
-
-            state_time_ns = self._publish_state_if_due()
-            self._wait_for_policy_command(state_time_ns)
-
-            buttons = self._buttons_snapshot()
-            running_default_pos = not (bool(buttons["A"]) or bool(buttons["stop"]))
-            if not running_default_pos:
-                break
-            timer.sleep()
-
     def simulate_control(self):
-        print("Running control loop...")
-        self.pre_control_marker_visible = False
-        with self._sim_lock:
-            self.data.qpos[self.root_qpos_address : self.root_qpos_address + 7] = self.root_qpos_control
-            mujoco.mj_forward(self.model, self.data)
-
+        print(
+            'Root unlocked; running physical control on the ground.\n'
+            'The red cylinder marks the state before the post-A policy; '
+            'press "a" to switch policy.'
+        )
         timer = Timer(self.low_level_dt)
         time_start = time.time()
         last_log_time = time_start
         loop_count = 0
 
         while self.is_alive:
-            if not self.policy_queried:
-                self._publish_state_if_due()
-                timer.sleep()
-                time_start = time.time()
-                last_log_time = time_start
-                loop_count = 0
-                continue
-
             with self._cmd_lock:
                 ptargets_mujoco = self._policy_to_mujoco(self._ptargets_policy)
                 kp_mujoco = self._policy_to_mujoco(self._kp_policy)
@@ -789,30 +742,16 @@ class Sim2Sim:
                 visualization = self._visualization_command
 
             with self._sim_lock:
-                self._apply_visualization_locked(visualization)
-                qpos = self.data.qpos[self.mujoco_qpos_addresses].copy()
-                qvel = self.data.qvel[self.mujoco_dof_addresses].copy()
-                if not self._have_tracking_target:
-                    delta = ptargets_mujoco - qpos
-                    if float(np.linalg.norm(delta)) > 1e-4:
-                        self._have_tracking_target = True
-                if not self._have_tracking_target:
-                    self.data.qpos[
-                        self.root_qpos_address : self.root_qpos_address + 7
-                    ] = self.root_qpos_control
-                    self.data.qvel[
-                        self.root_dof_address : self.root_dof_address + 6
-                    ] = 0.0
-                    self.data.qpos[self.mujoco_qpos_addresses] = ptargets_mujoco
-                    self.data.qvel[self.mujoco_dof_addresses] = 0.0
-                    self.data.ctrl[:] = 0.0
-                    mujoco.mj_forward(self.model, self.data)
-                else:
-                    ctrl = kp_mujoco * (ptargets_mujoco - qpos) + kd_mujoco * (0 - qvel)
-                    ctrl = np.clip(ctrl, self.ctrl_lower, self.ctrl_upper)
-                    self.data.ctrl[:] = ctrl
-                    self._limit_external_forces()
-                    mujoco.mj_step(self.model, self.data)
+                self._step_control_locked(
+                    ptargets_mujoco,
+                    kp_mujoco,
+                    kd_mujoco,
+                    visualization,
+                )
+
+            buttons = self._buttons_snapshot()
+            if buttons["A"]:
+                self.pre_control_marker_visible = False
 
             if not self._viewer_sync():
                 break
@@ -820,7 +759,7 @@ class Sim2Sim:
             state_time_ns = self._publish_state_if_due()
             self._wait_for_policy_command(state_time_ns)
 
-            if self._buttons_snapshot()["stop"]:
+            if buttons["stop"]:
                 # Publish the stop edge once even when it falls between normal
                 # state ticks, so the policy side can send its damping command.
                 self._publish_state()
@@ -849,6 +788,22 @@ class Sim2Sim:
             timer.sleep()
 
         self.close()
+
+    def _step_control_locked(
+        self,
+        ptargets_mujoco: np.ndarray,
+        kp_mujoco: np.ndarray,
+        kd_mujoco: np.ndarray,
+        visualization: dict | None,
+    ) -> None:
+        """Advance free-base physics once; never overwrite the robot root pose."""
+        self._apply_visualization_locked(visualization)
+        qpos = self.data.qpos[self.mujoco_qpos_addresses].copy()
+        qvel = self.data.qvel[self.mujoco_dof_addresses].copy()
+        ctrl = kp_mujoco * (ptargets_mujoco - qpos) - kd_mujoco * qvel
+        self.data.ctrl[:] = np.clip(ctrl, self.ctrl_lower, self.ctrl_upper)
+        self._limit_external_forces()
+        mujoco.mj_step(self.model, self.data)
 
     def _limit_external_forces(self):
         if self.max_external_force <= 0.0:
@@ -900,13 +855,11 @@ class Sim2Sim:
                 self.viewer = viewer
                 try:
                     self.wait_for_high_cmd()
-                    self.simulate_pre_control()
                     self.simulate_control()
                 finally:
                     self.viewer = None
         else:
             self.wait_for_high_cmd()
-            self.simulate_pre_control()
             self.simulate_control()
 
     def close(self, *args):

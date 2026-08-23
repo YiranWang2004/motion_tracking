@@ -8,6 +8,9 @@ pose:
 
 safety:
   prepare_seconds: 2.0
+  # sim2sim is already initialized at original DefaultPose, so one control
+  # tick is enough before LocoMode takes over the released floating base.
+  sim_prepare_seconds: 0.02
   state_timeout_s: 1.0
   max_target_delta: 0.15
   damping_kd: 8.0

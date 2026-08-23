@@ -26,10 +26,10 @@ from omnicontact.visualization_udp import (
     decode_visualization,
     encode_visualization,
 )
-from deploy_omnicontact import _run_actuated
+from deploy_omnicontact import _resolve_prepare_seconds, _run_actuated
 from paths import SIM2REAL_ROOT
 from scripts import view_calibrated_omnicontact_poses as twin_viewer
-from sim2sim import _set_pre_control_marker_geometry
+from sim2sim import Sim2Sim, _set_pre_control_marker_geometry
 
 
 class TestOmniContactPolicy(unittest.TestCase):
@@ -76,6 +76,57 @@ class TestOmniContactPolicy(unittest.TestCase):
         self.loco_mode.reset()
         repeated_first = self.loco_mode.compute(state)
         np.testing.assert_allclose(repeated_first.target_pos, first.target_pos, atol=1e-6)
+
+    def test_original_defaultpose_matches_locomode_entry_pose(self):
+        np.testing.assert_allclose(
+            self.policy.default_pose_lab,
+            self.loco_mode.default_lab,
+        )
+        omni_bridge = yaml.safe_load(
+            (SIM2REAL_ROOT / "config/g1/bridge_omnicontact.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        np.testing.assert_allclose(
+            omni_bridge["home_q"],
+            self.loco_mode.default_lab,
+        )
+
+    def test_generic_sim_bridges_initialize_at_controller_entry_pose(self):
+        for robot in ("g1", "l7"):
+            with self.subTest(robot=robot):
+                config_dir = SIM2REAL_ROOT / "config" / robot
+                bridge = yaml.safe_load(
+                    (config_dir / "bridge.yaml").read_text(encoding="utf-8")
+                )
+                controller = yaml.safe_load(
+                    (config_dir / "controller.yaml").read_text(encoding="utf-8")
+                )
+                np.testing.assert_allclose(
+                    bridge["home_q"],
+                    controller["init_qpos"],
+                )
+
+    def test_sim_uses_one_tick_defaultpose_before_locomode(self):
+        safety = {"prepare_seconds": 2.0, "sim_prepare_seconds": 0.02}
+        self.assertEqual(
+            _resolve_prepare_seconds(
+                None,
+                pose_source="sim",
+                safety_config=safety,
+                control_freq=50.0,
+            ),
+            0.02,
+        )
+        self.assertEqual(
+            _resolve_prepare_seconds(
+                None,
+                pose_source="local",
+                safety_config=safety,
+                control_freq=50.0,
+            ),
+            2.0,
+        )
 
     def test_completed_cfgen_switches_to_locomode(self):
         def bridge_state(sequence: int, *, stop: bool = False) -> BridgeState:
@@ -258,6 +309,68 @@ class TestOmniContactPolicy(unittest.TestCase):
                     rgba=np.asarray(marker["rgba"], dtype=np.float32),
                 )
                 self.assertEqual(scene.ngeom, 0)
+
+    def test_sim_control_step_does_not_lock_the_robot_root(self):
+        config_path = SIM2REAL_ROOT / "config/g1/bridge.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        model_path = (config_path.parent / config["xml_path"]).resolve()
+        model = mujoco.MjModel.from_xml_path(model_path.as_posix())
+        data = mujoco.MjData(model)
+
+        free_joint_id = int(
+            np.flatnonzero(model.jnt_type == mujoco.mjtJoint.mjJNT_FREE)[0]
+        )
+        root_qpos_address = int(model.jnt_qposadr[free_joint_id])
+        root_dof_address = int(model.jnt_dofadr[free_joint_id])
+        root_pose = np.asarray(config["root_qpos_control"], dtype=np.float64)
+        data.qpos[root_qpos_address : root_qpos_address + 7] = root_pose
+
+        joint_qpos_addresses = []
+        joint_dof_addresses = []
+        for name in config["mujoco_joint_names"]:
+            joint_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_JOINT, name
+            )
+            joint_qpos_addresses.append(int(model.jnt_qposadr[joint_id]))
+            joint_dof_addresses.append(int(model.jnt_dofadr[joint_id]))
+        joint_qpos_addresses = np.asarray(joint_qpos_addresses, dtype=np.int32)
+        joint_dof_addresses = np.asarray(joint_dof_addresses, dtype=np.int32)
+        data.qpos[joint_qpos_addresses] = np.asarray(
+            config["home_q"], dtype=np.float64
+        )
+        data.qvel[root_dof_address + 2] = 0.25
+        mujoco.mj_forward(model, data)
+
+        sim = object.__new__(Sim2Sim)
+        sim.model = model
+        sim.data = data
+        sim.mujoco_qpos_addresses = joint_qpos_addresses
+        sim.mujoco_dof_addresses = joint_dof_addresses
+        sim.ctrl_lower = np.full(model.nu, -np.inf)
+        sim.ctrl_upper = np.full(model.nu, np.inf)
+        sim.max_external_force = 0.0
+        sim._apply_visualization_locked = lambda visualization: None
+
+        initial_time = float(data.time)
+        initial_root = data.qpos[
+            root_qpos_address : root_qpos_address + 3
+        ].copy()
+        zeros = np.zeros(model.nu, dtype=np.float64)
+        Sim2Sim._step_control_locked(
+            sim,
+            data.qpos[joint_qpos_addresses].copy(),
+            zeros,
+            zeros,
+            None,
+        )
+
+        self.assertGreater(data.time, initial_time)
+        self.assertFalse(
+            np.array_equal(
+                data.qpos[root_qpos_address : root_qpos_address + 3],
+                initial_root,
+            )
+        )
 
     def test_sim2sim_scene_has_world_pelvis_and_box_coordinate_axes(self):
         scene_path = SIM2REAL_ROOT / "config/g1/assets/omnicontact_carry_box.xml"

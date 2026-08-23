@@ -111,10 +111,11 @@ Button sources:
 | G1 bridge terminal | keyboard `s` | keyboard `a` | keyboard `x` |
 | G1 robot remote | remote `start` | remote `A` | remote `select` |
 
-For sim2sim, the robot stays at its configured grounded task pose before `A`.
-A red cylinder above its head marks this pre-policy state and disappears when
-`A` starts policy control. Keep the simulator window focused when pressing
-`s`, `a`, or `x`.
+For sim2sim, the robot is initialized at its configured grounded task pose.
+Pressing `s` immediately releases the floating base and starts normal PD plus
+MuJoCo physics; there is no suspended or kinematically locked transition after
+`s`. A red cylinder above the head remains visible until `A` switches to the
+next policy. Keep the simulator window focused when pressing `s`, `a`, or `x`.
 
 VR has an additional live-stream control layer:
 
@@ -212,9 +213,10 @@ uv run src/deploy.py --robot g1 --tracking-config tracking_compliance.yaml
 After both terminals are running:
 
 1. focus the MuJoCo/sim2sim window
-2. press `s` to move from zero torque to the default pose
-3. wait for the default-pose transition to finish; the robot remains grounded
-   and the red cylinder above its head remains visible
+2. press `s`; the floating base is released immediately and the physical
+   default-pose/standing controller takes over on the ground
+3. wait for the default-pose transition to finish; the red cylinder above the
+   moving robot remains visible
 4. press `a` to enter the tracking policy; the red cylinder disappears
 5. use the selected motion source:
    - UDP: use `motion_select.py` to choose motions

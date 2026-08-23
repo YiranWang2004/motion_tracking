@@ -76,9 +76,12 @@ uv run src/deploy_omnicontact.py \
 Then operate in this order:
 
 1. Wait for terminal 2 to print `ZERO TORQUE`.
-2. In terminal 1 press `s`; the virtual robot is moved through the same
-   default-pose preparation state as real deployment. It remains at the
-   grounded task pose, with a red cylinder above its head marking pre-control.
+2. The virtual robot is already initialized at the original DefaultPose. In
+   terminal 1 press `s`; the floating base is released immediately, MuJoCo
+   physics starts, and LocoMode takes over after one 50 Hz control tick. A red
+   cylinder follows above its head to mark that the post-A policy has not
+   started yet. Real deployment keeps the configured 2-second DefaultPose
+   transition.
 3. Wait for terminal 2 to report that `LocoMode standing` is active. The
    recurrent zero-velocity locomotion policy now supports the robot, so the
    operator can release it before starting the task.

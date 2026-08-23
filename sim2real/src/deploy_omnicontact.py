@@ -61,6 +61,20 @@ def _section(config: dict[str, Any], name: str) -> dict[str, Any]:
     return value
 
 
+def _resolve_prepare_seconds(
+    requested: float | None,
+    *,
+    pose_source: str,
+    safety_config: dict[str, Any],
+    control_freq: float,
+) -> float:
+    if requested is not None:
+        return float(requested)
+    if pose_source == "sim":
+        return float(safety_config.get("sim_prepare_seconds", 1.0 / control_freq))
+    return float(safety_config["prepare_seconds"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run OmniContact carry-box through motion_tracking's G1 UDP/DDS bridge"
@@ -188,7 +202,7 @@ def _zero_torque_until_start(
     *,
     state_timeout_s: float,
 ) -> BridgeState:
-    LOGGER.warning("ZERO TORQUE: press Start to begin moving to OmniContact default pose")
+    LOGGER.warning("ZERO TORQUE: press Start to begin original DefaultPose")
     state = initial_state
     while not state.buttons["start"]:
         client.send_zero(state)
@@ -210,7 +224,7 @@ def _move_to_default(
     control_freq: float,
     state_timeout_s: float,
 ) -> BridgeState:
-    LOGGER.warning("Moving to OmniContact default pose over %.2f seconds", prepare_seconds)
+    LOGGER.warning("Moving to original DefaultPose over %.2f seconds", prepare_seconds)
     start_q = state.q_lab.copy()
     steps = max(1, int(round(prepare_seconds * control_freq)))
     for index in range(steps):
@@ -221,7 +235,7 @@ def _move_to_default(
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
         alpha = float(index + 1) / float(steps)
-        target = start_q * (1.0 - alpha) + policy.default_lab * alpha
+        target = start_q * (1.0 - alpha) + policy.default_pose_lab * alpha
         client.send(
             PDCommand(target, policy.default_kp_lab, policy.default_kd_lab),
             enable=1,
@@ -517,10 +531,11 @@ def main() -> int:
     min_pose_confidence = float(pose_config["min_confidence"])
     wait_timeout_s = float(pose_config["wait_timeout_s"])
     state_timeout_s = float(safety_config["state_timeout_s"])
-    prepare_seconds = float(
-        safety_config["prepare_seconds"]
-        if args.prepare_seconds is None
-        else args.prepare_seconds
+    prepare_seconds = _resolve_prepare_seconds(
+        args.prepare_seconds,
+        pose_source=args.pose_source,
+        safety_config=safety_config,
+        control_freq=control_freq,
     )
     max_target_delta = float(
         safety_config["max_target_delta"]

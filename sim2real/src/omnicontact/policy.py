@@ -171,8 +171,12 @@ class OmniContactCarryPolicy:
         self.upper_lab = np.asarray(model_cfg["joint_pos_upperlimit_lab"], dtype=np.float32)
         with (self.asset_dir / "DefaultPose.yaml").open("r", encoding="utf-8") as stream:
             default_pose_cfg = yaml.safe_load(stream)
+        default_pose_mj = np.asarray(
+            default_pose_cfg["default_angles"], dtype=np.float32
+        )
         default_kp_mj = np.asarray(default_pose_cfg["kps"], dtype=np.float32)
         default_kd_mj = np.asarray(default_pose_cfg["kds"], dtype=np.float32)
+        self.default_pose_lab = default_pose_mj[self.mj2lab]
         self.default_kp_lab = default_kp_mj[self.mj2lab]
         self.default_kd_lab = default_kd_mj[self.mj2lab]
         for name in (
@@ -182,6 +186,7 @@ class OmniContactCarryPolicy:
             "kd_lab",
             "lower_lab",
             "upper_lab",
+            "default_pose_lab",
             "default_kp_lab",
             "default_kd_lab",
         ):

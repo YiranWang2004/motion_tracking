@@ -151,8 +151,10 @@ uv run src/deploy_omnicontact.py \
 启动两个终端后按以下顺序操作：
 
 1. 等待控制器打印 `ZERO TORQUE`。
-2. 让 MuJoCo 窗口保持焦点，按 `s`，在任务对应地面位置进入默认姿态过渡；
-   机器人头顶的红色圆柱表示尚未进入 A 键后的策略。
+2. 虚拟机器人已经按原版 DefaultPose 初始化。让 MuJoCo 窗口保持焦点并按 `s`；
+   此时立即解除躯干根部锁定并进入 MuJoCo 物理闭环，一个 50 Hz 控制周期后由
+   LocoMode 接管，不存在按 `s` 后的悬空或锁根阶段。红色圆柱会跟随在机器人
+   头顶，表示尚未进入 A 键后的策略。实机仍保留配置的 2 秒 DefaultPose 过渡。
 3. 等待控制器提示 `LocoMode standing` 已启动；此时由原版零速度 LocoMode
    持续站立，操作员可先释放机器人。
 4. 在 MuJoCo 窗口按 `a`，红色圆柱消失，生成 carry-box 参考并开始策略控制。

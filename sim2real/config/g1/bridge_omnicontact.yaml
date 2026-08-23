@@ -64,13 +64,17 @@ mujoco_joint_names: [
 ]
 
 home_q: [
-  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-  0.0, 0.0
+  -0.2, -0.2, 0.0,
+  0.0, 0.0, 0.0,
+  0.0, 0.0, 0.0,
+  0.42, 0.42, 0.35, 0.35,
+  -0.23, -0.23, 0.18, -0.18,
+  0.0, 0.0, 0.0, 0.0,
+  0.87, 0.87, 0.0, 0.0,
+  0.0, 0.0, 0.0, 0.0
 ]
 
-# The robot remains at this grounded task pose before and after A.
+# The robot is initialized here on the ground. Pressing S releases the root.
 root_qpos_control: [0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]
 
 pre_control_marker:

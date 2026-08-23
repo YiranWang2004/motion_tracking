@@ -70,6 +70,7 @@ class LocoModePolicy:
         self.action_lab = np.zeros(self.ACTION_SIZE, dtype=np.float32)
         self.hidden_state = np.zeros((1, 1, self.HIDDEN_SIZE), dtype=np.float32)
         self.cell_state = np.zeros((1, 1, self.HIDDEN_SIZE), dtype=np.float32)
+        self.reset()
 
     @classmethod
     def _array(cls, config: dict, name: str) -> np.ndarray:
@@ -79,10 +80,28 @@ class LocoModePolicy:
         return value
 
     def reset(self) -> None:
-        """Reset the recurrent state whenever the FSM enters LocoMode."""
+        """Reset and warm the recurrent state as the original runner does."""
         self.action_lab.fill(0.0)
         self.hidden_state.fill(0.0)
         self.cell_state.fill(0.0)
+        zero_observation = np.zeros(
+            (1, self.OBSERVATION_SIZE), dtype=np.float32
+        )
+        for _ in range(50):
+            _, next_hidden, next_cell = self.session.run(
+                None,
+                {
+                    "observation": zero_observation,
+                    "hidden_state": self.hidden_state,
+                    "cell_state": self.cell_state,
+                },
+            )
+            self.hidden_state = np.asarray(next_hidden, dtype=np.float32).reshape(
+                1, 1, self.HIDDEN_SIZE
+            )
+            self.cell_state = np.asarray(next_cell, dtype=np.float32).reshape(
+                1, 1, self.HIDDEN_SIZE
+            )
 
     @staticmethod
     def _projected_gravity(quaternion_wxyz: np.ndarray) -> np.ndarray:

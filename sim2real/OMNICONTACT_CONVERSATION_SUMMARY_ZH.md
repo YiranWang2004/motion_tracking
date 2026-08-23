@@ -193,8 +193,13 @@ pre_control_marker:
 
 - `task_object.initial_position` 是箱子初始中心位置；
 - 箱子姿态由场景中的 free joint 初始四元数决定，默认是单位姿态；
-- `root_qpos_control` 是启动、默认姿态过渡和进入控制后共同使用的地面根部位姿；
-- `pre_control_marker` 是按下 A 之前显示在机器人头顶的红色圆柱，进入策略后隐藏；
+- `root_qpos_control` 只用于把机器人初始化到任务对应的地面根部位姿；按下 `s`
+  后立即解除根部锁定并由 PD + MuJoCo 物理闭环接管；
+- sim2sim 的 `home_q` 使用原版 DefaultPose；`sim_prepare_seconds: 0.02` 只保留
+  一个 50 Hz 控制周期，随后立即由原版 LocoMode 接管。实机继续使用
+  `prepare_seconds: 2.0`；
+- `pre_control_marker` 是按下 A 之前跟随显示在机器人头顶的红色圆柱，进入
+  A 键后的策略时隐藏；
 - `0.793 m` 是 sim2sim 中 G1 pelvis 的名义高度。
 
 sim2sim viewer 入口位于：
