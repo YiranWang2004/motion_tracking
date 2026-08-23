@@ -182,6 +182,22 @@ Reference and ghost geometry is hidden if the `55004` stream is stale (default
 `0.5` s). `--state-port 0` disables measured joints;
 `--no-visualization` disables the policy overlay.
 
+For interactive robot Tracker mount calibration, run the original calibrated
+pose viewer with `--tune-robot-tracker-to-pelvis`:
+
+```bash
+uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --tune-robot-tracker-to-pelvis \
+  --state-port 0 --no-visualization
+```
+
+The companion panel exposes absolute XYZ meters and fixed-axis XYZ RPY degrees
+for `robot_tracker_to_pelvis`. Changes update the pelvis live. Press `S` in
+either window to atomically replace only that JSON field. Closing without
+pressing `S` leaves the file untouched. Use `--tune-translation-range` to
+change the default +/-0.5 m XYZ range.
+
 If the twin runs on another computer, set `udp.state_mirror_host` in
 `g1_sim2real/config/g1_bridge.yaml` to that computer's wired IP, and pass the
 same IP to deployment with `--visualization-host`. Bind the twin receivers with

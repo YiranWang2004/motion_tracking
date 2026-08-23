@@ -1,3 +1,4 @@
+import json
 import socket
 import tempfile
 import time
@@ -509,6 +510,60 @@ class TestOmniContactPolicy(unittest.TestCase):
             )
             outward = np.mean(triangle, axis=0) - solid_center
             self.assertGreater(float(np.dot(normal, outward)), 0.0)
+
+    def test_tracker_to_pelvis_xyz_rpy_round_trip_handles_gimbal_lock(self):
+        original = twin_viewer.RigidTransform(
+            [0.01, -0.02, 0.07],
+            [0.5, -0.5, 0.5, 0.5],
+        )
+        values = twin_viewer._transform_to_xyz_rpy(original)
+        restored = twin_viewer._xyz_rpy_to_transform(values)
+
+        np.testing.assert_allclose(restored.position, original.position)
+        self.assertAlmostEqual(
+            abs(float(np.dot(restored.quaternion_xyzw, original.quaternion_xyzw))),
+            1.0,
+            places=7,
+        )
+
+    def test_tracker_to_pelvis_save_only_updates_selected_transform(self):
+        original_config = {
+            "calibration_confirmed": True,
+            "robot_tracker_serial": "robot",
+            "object_tracker_serial": "object",
+            "world_from_steamvr": {"keep": [1, 2, 3]},
+            "robot_tracker_to_pelvis": {
+                "position_m": [0, 0, 0],
+                "quaternion_xyzw": [0, 0, 0, 1],
+            },
+            "object_tracker_to_object": {"keep": "unchanged"},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "omnicontact_vive.json"
+            config_path.write_text(
+                json.dumps(original_config), encoding="utf-8"
+            )
+            transform = twin_viewer.RigidTransform(
+                [0.1, -0.2, 0.3],
+                [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)],
+            )
+            twin_viewer._save_robot_tracker_to_pelvis(config_path, transform)
+            saved = json.loads(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            saved["world_from_steamvr"], original_config["world_from_steamvr"]
+        )
+        self.assertEqual(
+            saved["object_tracker_to_object"],
+            original_config["object_tracker_to_object"],
+        )
+        np.testing.assert_allclose(
+            saved["robot_tracker_to_pelvis"]["position_m"], transform.position
+        )
+        np.testing.assert_allclose(
+            saved["robot_tracker_to_pelvis"]["quaternion_xyzw"],
+            transform.quaternion_xyzw,
+        )
 
 
 if __name__ == "__main__":

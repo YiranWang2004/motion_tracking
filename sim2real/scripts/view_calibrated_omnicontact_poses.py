@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import tempfile
 import sys
+import threading
 import time
+import warnings
 from pathlib import Path
 
 import mujoco
 import mujoco.viewer
 import numpy as np
 import yaml
+from scipy.spatial.transform import Rotation
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SRC_ROOT = SCRIPT_DIR.parent / "src"
@@ -121,6 +125,203 @@ def _set_mocap(model: mujoco.MjModel, data: mujoco.MjData, body_name: str, trans
     data.mocap_pos[mocap_id] = transform.position
     q = transform.quaternion_xyzw
     data.mocap_quat[mocap_id] = (q[3], q[0], q[1], q[2])
+
+
+def _transform_to_xyz_rpy(transform: RigidTransform) -> np.ndarray:
+    """Return XYZ meters and fixed-axis XYZ roll/pitch/yaw in degrees."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        rpy_deg = Rotation.from_quat(transform.quaternion_xyzw).as_euler(
+            "xyz", degrees=True
+        )
+    return np.concatenate((transform.position, rpy_deg))
+
+
+def _xyz_rpy_to_transform(values: np.ndarray) -> RigidTransform:
+    values = np.asarray(values, dtype=np.float64).reshape(6)
+    if not np.all(np.isfinite(values)):
+        raise ValueError("tracker-to-pelvis slider values must be finite")
+    quaternion_xyzw = Rotation.from_euler(
+        "xyz", values[3:], degrees=True
+    ).as_quat()
+    return RigidTransform(values[:3], quaternion_xyzw)
+
+
+def _save_robot_tracker_to_pelvis(
+    config_path: Path,
+    transform: RigidTransform,
+) -> None:
+    """Atomically update only robot_tracker_to_pelvis in the JSON config."""
+    try:
+        raw = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read Vive config {config_path}: {exc}") from exc
+    if not isinstance(raw, dict) or not isinstance(
+        raw.get("robot_tracker_to_pelvis"), dict
+    ):
+        raise ValueError("Vive config is missing robot_tracker_to_pelvis")
+    raw["robot_tracker_to_pelvis"] = {
+        "position_m": [float(value) for value in transform.position],
+        "quaternion_xyzw": [
+            float(value) for value in transform.quaternion_xyzw
+        ],
+    }
+
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{config_path.name}.",
+        suffix=".tmp",
+        dir=config_path.parent,
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+            json.dump(raw, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary_path, config_path.stat().st_mode & 0o777)
+        os.replace(temporary_path, config_path)
+    except BaseException:
+        try:
+            temporary_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+class RobotTrackerToPelvisTuner:
+    """Thread-owned Tk sliders with a lock-protected transform snapshot."""
+
+    def __init__(
+        self,
+        initial_transform: RigidTransform,
+        *,
+        translation_range_m: float,
+        save_requested: threading.Event,
+    ) -> None:
+        self._values = _transform_to_xyz_rpy(initial_transform)
+        self._translation_range_m = max(
+            float(translation_range_m),
+            float(np.max(np.abs(self._values[:3]))) + 0.05,
+        )
+        self._save_requested = save_requested
+        self._lock = threading.Lock()
+        self._status = "未保存：拖动滑条实时预览；按 S 写入配置"
+        self._status_revision = 0
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name="robot-tracker-to-pelvis-tuner",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+        if not self._ready.wait(timeout=5.0):
+            raise RuntimeError("timed out while opening tracker calibration sliders")
+        if self._error is not None:
+            raise RuntimeError(
+                f"cannot open tracker calibration sliders: {self._error}"
+            ) from self._error
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def transform(self) -> RigidTransform:
+        with self._lock:
+            values = self._values.copy()
+        return _xyz_rpy_to_transform(values)
+
+    def mark_saved(self, message: str) -> None:
+        with self._lock:
+            self._status = message
+            self._status_revision += 1
+
+    def _set_value(self, index: int, raw_value: str) -> None:
+        with self._lock:
+            self._values[index] = float(raw_value)
+            self._status = "有未保存修改：按 S 写入配置"
+            self._status_revision += 1
+
+    def _run(self) -> None:
+        try:
+            import tkinter as tk
+
+            root = tk.Tk()
+            root.title("robot_tracker_to_pelvis 标定")
+            root.resizable(False, False)
+            tk.Label(
+                root,
+                text=(
+                    "绝对变换 ^Tracker T_pelvis\n"
+                    "XYZ: 米；RPY: 度（固定轴 X-Y-Z）"
+                ),
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=(10, 4))
+
+            labels = (
+                "X (m)",
+                "Y (m)",
+                "Z (m)",
+                "Roll (deg)",
+                "Pitch (deg)",
+                "Yaw (deg)",
+            )
+            for index, label in enumerate(labels):
+                is_translation = index < 3
+                limit = self._translation_range_m if is_translation else 180.0
+                resolution = 0.001 if is_translation else 0.1
+                slider = tk.Scale(
+                    root,
+                    label=label,
+                    from_=-limit,
+                    to=limit,
+                    resolution=resolution,
+                    orient=tk.HORIZONTAL,
+                    length=480,
+                )
+                slider.set(float(self._values[index]))
+                slider.configure(
+                    command=lambda value, i=index: self._set_value(i, value)
+                )
+                slider.pack(fill="x", padx=12)
+
+            status_variable = tk.StringVar(value=self._status)
+            tk.Label(
+                root,
+                textvariable=status_variable,
+                fg="#8b2500",
+                justify="left",
+            ).pack(anchor="w", padx=12, pady=(6, 10))
+            root.bind_all("<KeyPress-s>", lambda _event: self._save_requested.set())
+            root.bind_all("<KeyPress-S>", lambda _event: self._save_requested.set())
+
+            last_status_revision = -1
+
+            def poll_state() -> None:
+                nonlocal last_status_revision
+                if self._stop.is_set():
+                    root.destroy()
+                    return
+                with self._lock:
+                    status = self._status
+                    revision = self._status_revision
+                if revision != last_status_revision:
+                    status_variable.set(status)
+                    last_status_revision = revision
+                root.after(50, poll_state)
+
+            root.protocol("WM_DELETE_WINDOW", root.destroy)
+            root.after(50, poll_state)
+            self._ready.set()
+            root.mainloop()
+        except BaseException as exc:
+            self._error = exc
+            self._ready.set()
 
 
 def _load_joint_setup(
@@ -258,9 +459,22 @@ def _args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--no-visualization", action="store_true")
     parser.add_argument("--stale-timeout", type=float, default=0.5)
     parser.add_argument("--no-robot", action="store_true", help="hide the G1 mesh")
+    parser.add_argument(
+        "--tune-robot-tracker-to-pelvis",
+        action="store_true",
+        help="open live XYZ/RPY sliders; press S to atomically save the transform",
+    )
+    parser.add_argument(
+        "--tune-translation-range",
+        type=float,
+        default=0.5,
+        help="absolute XYZ slider range in meters (default: 0.5)",
+    )
     args = parser.parse_args(argv)
     if args.fps <= 0 or args.stale_timeout <= 0:
         parser.error("--fps and --stale-timeout must be positive")
+    if args.tune_translation_range <= 0:
+        parser.error("--tune-translation-range must be positive")
     for name in ("state_port", "visualization_port"):
         port = int(getattr(args, name))
         if not 0 <= port <= 65535:
@@ -296,6 +510,8 @@ def main(argv: list[str] | None = None) -> int:
         receiver = UDPLatestReceiver(args.state_host, args.state_port)
         receiver.start()
     visualization_receiver = None
+    tuner = None
+    save_requested = threading.Event()
     if not args.no_visualization:
         visualization_receiver = VisualizationReceiver(
             args.visualization_host, args.visualization_port
@@ -357,11 +573,34 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Calibrated OmniContact viewer: robot={config.robot_tracker_serial}, object={config.object_tracker_serial}")
         print(f"Detected trackers: {', '.join(sorted(devices))}")
         print("Blue/orange pyramids are trackers; red/green/blue axes are X/Y/Z. Read-only viewer.")
+        if args.tune_robot_tracker_to_pelvis:
+            tuner = RobotTrackerToPelvisTuner(
+                config.robot_tracker_to_pelvis,
+                translation_range_m=args.tune_translation_range,
+                save_requested=save_requested,
+            )
+            tuner.start()
+            print(
+                "Calibration sliders opened. Press S in either window to save "
+                f"robot_tracker_to_pelvis to {config_path}"
+            )
+
+        def on_key(keycode: int) -> None:
+            if tuner is not None and keycode in (ord("S"), ord("s")):
+                save_requested.set()
+
         frame_period = 1.0 / args.fps
         last_state_seq = None
         last_visual_seq = None
         last_reference_time = 0.0
-        with mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+        last_world_from_robot_tracker = None
+        with mujoco.viewer.launch_passive(
+            model,
+            data,
+            key_callback=on_key,
+            show_left_ui=False,
+            show_right_ui=False,
+        ) as viewer:
             viewer.cam.lookat[:] = (0.8, 0.0, 0.8)
             viewer.cam.distance = 3.0
             viewer.cam.azimuth = 135.0
@@ -371,9 +610,21 @@ def main(argv: list[str] | None = None) -> int:
                 samples = reader.read_all((config.robot_tracker_serial, config.object_tracker_serial))
                 rs, os = samples.get(config.robot_tracker_serial), samples.get(config.object_tracker_serial)
                 if rs is not None:
-                    wrt = config.world_from_steamvr.compose(sample_to_transform(rs))
-                    pelvis = wrt.compose(config.robot_tracker_to_pelvis)
-                    _set_transform_qpos(data, tracker_robot, wrt)
+                    last_world_from_robot_tracker = config.world_from_steamvr.compose(
+                        sample_to_transform(rs)
+                    )
+                if last_world_from_robot_tracker is not None:
+                    tracker_to_pelvis = (
+                        config.robot_tracker_to_pelvis
+                        if tuner is None
+                        else tuner.transform()
+                    )
+                    pelvis = last_world_from_robot_tracker.compose(
+                        tracker_to_pelvis
+                    )
+                    _set_transform_qpos(
+                        data, tracker_robot, last_world_from_robot_tracker
+                    )
                     _set_mocap(model, data, "calib_pelvis_frame", pelvis)
                     if not args.no_robot:
                         _set_transform_qpos(data, robot_root, pelvis)
@@ -383,6 +634,26 @@ def main(argv: list[str] | None = None) -> int:
                     _set_transform_qpos(data, tracker_object, wot)
                     _set_mocap(model, data, "calib_box_frame", box)
                     _set_transform_qpos(data, box_root, box)
+                if tuner is not None and save_requested.is_set():
+                    save_requested.clear()
+                    transform_to_save = tuner.transform()
+                    try:
+                        _save_robot_tracker_to_pelvis(
+                            config_path, transform_to_save
+                        )
+                    except (OSError, ValueError) as exc:
+                        message = f"保存失败：{exc}"
+                        tuner.mark_saved(message)
+                        print(message, file=sys.stderr)
+                    else:
+                        values = _transform_to_xyz_rpy(transform_to_save)
+                        message = (
+                            "已保存 robot_tracker_to_pelvis: "
+                            f"xyz={values[:3].round(4).tolist()} m, "
+                            f"rpy={values[3:].round(2).tolist()} deg"
+                        )
+                        tuner.mark_saved(message)
+                        print(f"{message} -> {config_path}")
                 if receiver is not None:
                     packet = receiver.read_latest_data(with_meta=True)
                     if packet is not None and packet.seq != last_state_seq:
@@ -419,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
                 if delay > 0:
                     time.sleep(delay)
     finally:
+        if tuner is not None:
+            tuner.close()
         reader.stop()
         if receiver is not None:
             receiver.close()

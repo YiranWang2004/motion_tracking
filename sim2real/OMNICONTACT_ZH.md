@@ -700,6 +700,29 @@ uv run --extra vive python scripts/real_omnicontact_viewer.py \
 （默认 0.5 秒）未更新时会自动隐藏，避免把过期姿态误认为实时输出。
 `--fps` 控制 viewer 刷新频率。相机只在启动时设定一次，不会锁定或跟随 Tracker 的平移。
 
+#### 交互调整 robot Tracker 到 pelvis 的安装变换
+
+在标定 viewer 上增加下面的参数，会同时打开一个包含六个滑动条的小窗口：
+
+```bash
+uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --tune-robot-tracker-to-pelvis \
+  --state-port 0 --no-visualization
+```
+
+六个滑动条直接表示绝对变换 `robot_tracker_to_pelvis`，即
+`^Tracker T_pelvis`：XYZ 单位为米，Roll/Pitch/Yaw 单位为度，旋转采用固定轴
+X-Y-Z。拖动后 MuJoCo 中的 pelvis 坐标轴和机器人根部会实时更新。
+
+- 在 MuJoCo 窗口或滑动条窗口按 `S`：只覆盖当前 `--vive-config` JSON 中的
+  `robot_tracker_to_pelvis`，其他标定字段保持不变；写入采用临时文件原子替换。
+- 不按 `S` 直接关闭任一窗口：不会写配置文件。
+- XYZ 默认范围为 `[-0.5, 0.5]` 米；需要更大范围时使用
+  `--tune-translation-range <米>`。
+- 当前四元数处于欧拉角奇异位形时，面板会选择一个等价 RPY 表达；打开面板
+  本身不会保存或改变配置中的四元数，只有按 `S` 才会写入等价的新四元数。
+
 如果孪生窗口在另一台电脑，把 `g1_sim2real/config/g1_bridge.yaml` 中的
 `state_mirror_host` 改成 viewer 电脑的有线 IP，并给 deploy 加
 `--visualization-host <VIEWER_IP>`；viewer 使用
