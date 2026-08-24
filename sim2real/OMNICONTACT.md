@@ -60,6 +60,25 @@ uv run src/sim2sim.py \
 
 Use `--headless` only when no MuJoCo window is wanted.
 
+To seed sim2sim from the current calibrated physical layout instead of the
+bridge YAML defaults, run terminal 1 as:
+
+```bash
+uv run --extra vive python src/sim2sim.py \
+  --robot g1 \
+  --bridge-config config/g1/bridge_omnicontact.yaml \
+  --initial-scene-source vive \
+  --vive-config config/g1/omnicontact_vive.json
+```
+
+This captures one fresh Vive robot/object pair, initializes both MuJoCo free
+joints with the calibrated world poses, and publishes the JSON
+`goal_position_w` in the simulation state. OpenVR is released after the
+snapshot; MuJoCo then evolves independently rather than continually
+teleporting bodies to the live Trackers. The perceived box half-extents must
+match the MuJoCo box. Robot joint angles are not sensed by this mode, so the
+simulated joints still start at OmniContact DefaultPose.
+
 Open terminal 2:
 
 ```bash
@@ -72,6 +91,11 @@ uv run src/deploy_omnicontact.py \
   --act \
   --confirm-actuation ENABLE_MOTORS
 ```
+
+With Vive-seeded sim2sim, omit `--goal-position`; deploy then consumes the goal
+published by sim2sim. An explicit `--goal-position` remains a simulation-only
+override. If neither is available, the compatibility default remains
+`[1.0, 1.0, 0.15]`.
 
 Then operate in this order:
 
@@ -97,7 +121,7 @@ Then operate in this order:
 
 The simulator publishes robot pelvis and box poses in the same state packet as
 joint/IMU data, so `--pose-source sim` does not use Vive. The checked config
-sets the box center to `[1, 0, 0.15]`, the goal to the command-line value, the
+sets the box center to `[0, 0.7, 0.15]`, the goal to the command-line value, the
 physics loop to 200 Hz, and the deployment interface to 50 Hz. Its lockstep
 option removes Python process scheduling jitter by pairing each policy command
 with one state frame; it does not bypass UDP or the deployment safety path. Do
@@ -192,6 +216,27 @@ only to `55002`. Closing or stalling the twin cannot enter that command path.
 Reference and ghost geometry is hidden if the `55004` stream is stale (default
 `0.5` s). `--state-port 0` disables measured joints;
 `--no-visualization` disables the policy overlay.
+
+Each deployment also writes a same-stem `deploy_*.observations.npz`. Schema v2
+records every bridge control state from zero-torque startup through final
+damping, including both raw/calibrated Tracker transforms, calibrated
+pelvis/object runtime poses and velocities, measured LowState `q_lab/dq_lab`,
+IMU, policy observations/history/actions, commands and phase events. Replay it
+without connecting OpenVR, the bridge or the policy process:
+
+```bash
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --replay-log ../logs/omnicontact/deploy_CASE.observations.npz
+```
+
+The terminal progress line includes frame counts, relative and wall-clock log
+time, state sequence, policy frame, phase event and pose validity. Space/P
+pauses, N/B steps one frame, and R restarts. `--replay-speed`,
+`--replay-start-frame`, `--replay-paused` and `--replay-loop` control playback.
+Schema-v1 archives remain loadable, but their Tracker markers are reconstructed
+from the logged pelvis/object poses because those archives did not store the
+source Tracker transforms or the full pre-policy startup.
 
 For interactive robot Tracker mount calibration, run the original calibrated
 pose viewer with `--tune-robot-tracker-to-pelvis`:

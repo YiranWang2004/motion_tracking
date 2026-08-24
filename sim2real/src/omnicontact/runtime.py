@@ -144,6 +144,7 @@ class MotionBridgeClient:
         self.max_command_gap_ms = 0.0
         self._last_command_attempt_ns: int | None = None
         self.latest_state: BridgeState | None = None
+        self.sim_goal_position_w: np.ndarray | None = None
 
     def close(self) -> None:
         self.transport.close()
@@ -213,6 +214,7 @@ class MotionBridgeClient:
         raw = data.get("sim_pose")
         if not isinstance(raw, dict):
             self.pose_sink.clear()
+            self.sim_goal_position_w = None
             return
         robot = raw.get("robot")
         obj = raw.get("object")
@@ -237,6 +239,16 @@ class MotionBridgeClient:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise RuntimeError(f"simulation bridge returned malformed task poses: {exc}") from exc
+        raw_goal = raw.get("goal_position_w")
+        if raw_goal is None:
+            self.sim_goal_position_w = None
+        else:
+            try:
+                self.sim_goal_position_w = TaskGoal(raw_goal).position_w
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"simulation bridge returned malformed task goal: {exc}"
+                ) from exc
         self.pose_sink.publish_pair(robot_pose, object_pose)
 
     def set_carrybox_scene(self, object_pose: ObjectPose, goal: TaskGoal) -> None:

@@ -121,6 +121,30 @@ lockstep_policy: true
 
 不要同时运行真实 G1 C++ 桥接器占用这两个端口。
 
+#### 用实际感知场景初始化 sim2sim
+
+如果希望规划从当前实机布局开始，而不是使用 YAML 中的默认 pelvis 和箱子
+初始位姿，终端一改为：
+
+```bash
+cd <repo>/motion_tracking/sim2real
+uv run --extra vive python src/sim2sim.py \
+  --robot g1 \
+  --bridge-config config/g1/bridge_omnicontact.yaml \
+  --initial-scene-source vive \
+  --vive-config config/g1/omnicontact_vive.json
+```
+
+sim2sim 会等待一对新鲜、经过标定的 robot/object Tracker 位姿，把 robot
+pelvis 和箱子的完整位置与姿态写入 MuJoCo free joint，并把同一 JSON 中的
+`goal_position_w` 放入后续 bridge 状态包。初始化快照完成后会释放 OpenVR；
+仿真随后独立运行，不会持续用 Tracker 强制覆盖 MuJoCo 刚体。
+
+此模式要求 `object_half_extents_m` 与场景 XML 中箱子尺寸一致。它只同步
+pelvis 的全局刚体位姿，不同步实机关节角，仿真关节仍使用配置的
+OmniContact DefaultPose。采样期间应保持机器人和箱子静止，并先在 MuJoCo
+窗口核对世界、pelvis 和箱子坐标轴。
+
 ### 3.3 启动 OmniContact 控制器
 
 终端二：
@@ -144,7 +168,8 @@ uv run src/deploy_omnicontact.py \
 - `--confirm-actuation ENABLE_MOTORS`：电机输出的强制确认字符串；
 - `--max-target-delta 1.0`：仿真中用于复现原始 OmniContact 闭环的限幅设置。
 
-仿真配置中的箱子初始中心是 `[1.0, 0.0, 0.15]`。`--goal-position` 只改变目标，不改变箱子初始位置。
+默认仿真配置中的箱子初始中心是 `[0.0, 0.7, 0.15]`。`--goal-position`
+只改变目标，不改变箱子初始位置；Vive 初始化模式则会用感知快照覆盖该默认初始位姿。
 
 ### 3.4 仿真按钮和状态顺序
 

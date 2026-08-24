@@ -14,6 +14,11 @@ from omnicontact.contracts import ObjectPose, PDCommand, RobotPose, TaskGoal
 from omnicontact.diagnostics import ObservationHistoryRecorder
 from omnicontact.loco_mode import LocoModePolicy
 from omnicontact.policy import OmniContactCarryPolicy, RobotPolicyState
+from omnicontact.replay import (
+    OmniContactReplayLog,
+    ReplayClock,
+    format_replay_progress,
+)
 from omnicontact.runtime import (
     BridgePoseProvider,
     BridgeState,
@@ -28,6 +33,7 @@ from omnicontact.visualization_udp import (
     encode_visualization,
 )
 from deploy_omnicontact import (
+    _resolve_goal_position,
     _resolve_prepare_seconds,
     _run_actuated,
     _wait_for_loco_start,
@@ -36,9 +42,12 @@ from paths import SIM2REAL_ROOT
 from scripts import view_calibrated_omnicontact_poses as twin_viewer
 from sim2sim import (
     BUTTON_KEYS,
+    InitialTaskScene,
     Keyboard2Button,
     Sim2Sim,
     _set_pre_control_marker_geometry,
+    _xyzw_pose_to_freejoint_qpos,
+    load_config,
 )
 
 
@@ -675,7 +684,26 @@ class TestOmniContactPolicy(unittest.TestCase):
                 packet_seq=456,
                 packet_arrival_ns=789,
             )
-            provider = SimpleNamespace(valid_updates=100, invalid_updates=3)
+            class DiagnosticProvider:
+                valid_updates = 100
+                invalid_updates = 3
+
+                @staticmethod
+                def get_tracker_diagnostics(requested_stamp):
+                    self.assertEqual(requested_stamp, stamp)
+                    return {
+                        "tracker_sample_wall_time_ns": 1_000_000_002,
+                        "robot_tracker_position_w": np.array([0.1, 0.2, 0.3]),
+                        "robot_tracker_quaternion_xyzw": np.array([0, 0, 0, 1]),
+                        "object_tracker_position_w": np.array([1.1, 1.2, 1.3]),
+                        "object_tracker_quaternion_xyzw": np.array([0, 0, 0, 1]),
+                        "robot_tracker_position_steamvr": np.array([2.1, 2.2, 2.3]),
+                        "robot_tracker_quaternion_xyzw_steamvr": np.array([0, 0, 0, 1]),
+                        "object_tracker_position_steamvr": np.array([3.1, 3.2, 3.3]),
+                        "object_tracker_quaternion_xyzw_steamvr": np.array([0, 0, 0, 1]),
+                    }
+
+            provider = DiagnosticProvider()
             command = PDCommand(
                 np.arange(29, dtype=np.float32) * 0.01,
                 np.ones(29, dtype=np.float32) * 40.0,
@@ -712,12 +740,61 @@ class TestOmniContactPolicy(unittest.TestCase):
                 np.testing.assert_array_equal(archive["observation_history"][0], history)
                 np.testing.assert_array_equal(archive["policy_action"][0], action)
                 self.assertEqual(archive["provider_invalid_count"][0], 3)
+                self.assertTrue(archive["tracker_diagnostics_exact"][0])
+                np.testing.assert_allclose(
+                    archive["robot_tracker_position_w"][0], [0.1, 0.2, 0.3]
+                )
                 self.assertEqual(str(archive["event"][0]), "policy_tracking")
                 metadata = json.loads(str(archive["metadata_json"]))
                 self.assertEqual(metadata["termination_reason"], "fatal_exception")
                 self.assertEqual(metadata["row_count"], 1)
                 schema = json.loads(str(archive["schema_json"]))
+                self.assertEqual(int(archive["schema_version"]), 2)
                 self.assertEqual(schema["observation_layout"]["tracking_reference"], [0, 539])
+
+            replay = OmniContactReplayLog.load(path)
+            self.assertEqual(replay.frame_count, 1)
+            self.assertTrue(replay.has_recorded_trackers)
+            replay_from_text_name = OmniContactReplayLog.load(
+                path.with_name("deploy_case.log")
+            )
+            self.assertEqual(replay_from_text_name.path, path)
+            np.testing.assert_array_equal(
+                replay.joint_columns([f"joint_{index}" for index in range(29)]),
+                np.arange(29),
+            )
+            clock = ReplayClock(replay, paused=True)
+            self.assertEqual(clock.step(1), 0)
+            progress = format_replay_progress(
+                replay, 0, paused=True, speed=1.0
+            )
+            self.assertIn("1/1", progress)
+            self.assertIn("seq=456", progress)
+
+            old_path = Path(directory) / "old_v1.observations.npz"
+            tracker_fields = {
+                "tracker_diagnostics_exact",
+                "tracker_sample_wall_time_ns",
+                "robot_tracker_position_w",
+                "robot_tracker_quaternion_xyzw",
+                "object_tracker_position_w",
+                "object_tracker_quaternion_xyzw",
+                "robot_tracker_position_steamvr",
+                "robot_tracker_quaternion_xyzw_steamvr",
+                "object_tracker_position_steamvr",
+                "object_tracker_quaternion_xyzw_steamvr",
+            }
+            with np.load(path, allow_pickle=False) as archive:
+                old_arrays = {
+                    name: archive[name]
+                    for name in archive.files
+                    if name not in tracker_fields
+                }
+            old_arrays["schema_version"] = np.asarray(1, dtype=np.int32)
+            np.savez_compressed(old_path, **old_arrays)
+            old_replay = OmniContactReplayLog.load(old_path)
+            self.assertEqual(old_replay.schema_version, 1)
+            self.assertFalse(old_replay.has_recorded_trackers)
 
     def test_empty_observation_history_recorder_has_stable_shapes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -771,6 +848,7 @@ class TestOmniContactPolicy(unittest.TestCase):
         client._publish_sim_pose(
             {
                 "sim_pose": {
+                    "goal_position_w": [1.0, 1.5, 0.15],
                     "robot": {
                         "position_w": [0, 0, 0.793],
                         "quaternion_xyzw": [0, 0, 0, 1],
@@ -788,7 +866,106 @@ class TestOmniContactPolicy(unittest.TestCase):
         robot, obj = provider.get_poses()
         np.testing.assert_allclose(robot.position_w, [0, 0, 0.793])
         np.testing.assert_allclose(obj.position_w, [1, 0, 0.15])
+        np.testing.assert_allclose(client.sim_goal_position_w, [1.0, 1.5, 0.15])
         self.assertEqual(robot.stamp_s, obj.stamp_s)
+
+    def test_sim_goal_uses_cli_then_bridge_then_legacy_default(self):
+        client = SimpleNamespace(
+            sim_goal_position_w=np.array([2.0, 3.0, 0.15], dtype=np.float32)
+        )
+        args = SimpleNamespace(goal_position=[4.0, 5.0, 0.15])
+        np.testing.assert_allclose(
+            _resolve_goal_position(args, None, client),
+            [4.0, 5.0, 0.15],
+        )
+        args.goal_position = None
+        np.testing.assert_allclose(
+            _resolve_goal_position(args, None, client),
+            [2.0, 3.0, 0.15],
+        )
+        client.sim_goal_position_w = None
+        np.testing.assert_allclose(
+            _resolve_goal_position(args, None, client),
+            [1.0, 1.0, 0.15],
+        )
+        vive_config = SimpleNamespace(
+            goal_position_w=np.array([6.0, 7.0, 0.15], dtype=np.float64)
+        )
+        args.goal_position = [8.0, 9.0, 0.15]
+        np.testing.assert_allclose(
+            _resolve_goal_position(args, vive_config, client),
+            [6.0, 7.0, 0.15],
+        )
+
+    def test_perceived_pose_converts_xyzw_to_mujoco_freejoint_order(self):
+        qpos = _xyzw_pose_to_freejoint_qpos(
+            np.array([1.0, -2.0, 0.8]),
+            np.array([0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]),
+        )
+        np.testing.assert_allclose(
+            qpos,
+            [1.0, -2.0, 0.8, np.sqrt(0.5), 0.0, 0.0, np.sqrt(0.5)],
+        )
+
+    def test_perceived_scene_initializes_robot_box_and_goal(self):
+        stamp = time.monotonic()
+        scene = InitialTaskScene(
+            RobotPose([0.2, -0.3, 0.793], [0.0, 0.0, 0.0, 1.0], stamp),
+            ObjectPose(
+                [0.8, 0.4, 0.15],
+                [0.0, 0.0, 0.0, 1.0],
+                [0.15, 0.15, 0.15],
+                stamp,
+            ),
+            [1.2, 1.4, 0.15],
+        )
+        config = load_config(
+            (SIM2REAL_ROOT / "config/g1/bridge_omnicontact.yaml").as_posix()
+        )
+        sim = Sim2Sim(
+            SimpleNamespace(robot="g1", xml_path=None, headless=True),
+            config,
+            initial_scene=scene,
+        )
+        try:
+            np.testing.assert_allclose(
+                sim.data.qpos[
+                    sim.root_qpos_address : sim.root_qpos_address + 7
+                ],
+                [0.2, -0.3, 0.793, 1.0, 0.0, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                sim.data.qpos[
+                    sim.task_object_qpos_address : sim.task_object_qpos_address + 7
+                ],
+                [0.8, 0.4, 0.15, 1.0, 0.0, 0.0, 0.0],
+            )
+            np.testing.assert_allclose(
+                sim.task_goal_position_w,
+                [1.2, 1.4, 0.15],
+            )
+        finally:
+            sim.transport.close()
+
+    def test_sim_pose_payload_carries_perceived_goal(self):
+        sim = object.__new__(Sim2Sim)
+        sim.task_object_body_id = 1
+        sim.task_object_dof_address = 0
+        sim.task_object_half_extents = np.array([0.15, 0.15, 0.15], dtype=np.float32)
+        sim.task_goal_position_w = np.array([1.0, 1.5, 0.15], dtype=np.float64)
+        sim.data = SimpleNamespace(
+            qvel=np.zeros(6, dtype=np.float64),
+            xpos=np.array([[0.0, 0.0, 0.0], [0.5, 0.7, 0.15]]),
+            xquat=np.array([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]),
+        )
+        payload = Sim2Sim._task_pose_payload(
+            sim,
+            np.array([0.0, 0.0, 0.793, 1.0, 0.0, 0.0, 0.0]),
+        )
+        np.testing.assert_allclose(
+            payload["sim_pose"]["goal_position_w"],
+            [1.0, 1.5, 0.15],
+        )
 
     def test_bridge_client_detects_remote_b_rising_edge(self):
         def packet(sequence: int, b_pressed: bool):
@@ -1086,6 +1263,102 @@ class TestOmniContactPolicy(unittest.TestCase):
         twin_viewer._set_reference_visibility(model, reference_alpha, False)
         self.assertTrue(
             all(model.geom_rgba[index, 3] == 0 for index in reference_alpha)
+        )
+
+    def test_runtime_replay_uses_measured_joints_and_recorded_trackers(self):
+        scene_path = SIM2REAL_ROOT / "config/g1/assets/omnicontact_carry_box.xml"
+        with tempfile.NamedTemporaryFile(
+            "w",
+            suffix=".xml",
+            dir=scene_path.parent,
+            delete=False,
+            encoding="utf-8",
+        ) as stream:
+            stream.write(twin_viewer._expanded_xml(scene_path))
+            expanded_path = Path(stream.name)
+        try:
+            model = mujoco.MjModel.from_xml_path(expanded_path.as_posix())
+        finally:
+            expanded_path.unlink()
+        data = mujoco.MjData(model)
+        joint_qpos, _, _ = twin_viewer._load_joint_setup(
+            model, SIM2REAL_ROOT / "config/g1"
+        )
+        bridge = yaml.safe_load(
+            (SIM2REAL_ROOT / "config/g1/bridge_omnicontact.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        joint_names = list(bridge["policy_joint_names"])
+        joint_dof = np.asarray(
+            [twin_viewer._dof_addr(model, name) for name in joint_names],
+            dtype=int,
+        )
+        measured_q = np.linspace(-0.4, 0.4, 29, dtype=np.float32)
+        measured_dq = np.linspace(-1.0, 1.0, 29, dtype=np.float32)
+        replay = SimpleNamespace(
+            arrays={
+                "q_lab": measured_q[None, :],
+                "dq_lab": measured_dq[None, :],
+                "robot_position_w": np.array([[0.2, -0.1, 0.75]], dtype=np.float32),
+                "robot_quaternion_xyzw": np.array([[0, 0, 0, 1]], dtype=np.float32),
+                "object_position_w": np.array([[0.8, 0.3, 0.2]], dtype=np.float32),
+                "object_quaternion_xyzw": np.array([[0, 0, 0, 1]], dtype=np.float32),
+                "object_linear_velocity_w": np.array([[0.1, 0.2, 0.3]], dtype=np.float32),
+                "object_angular_velocity_w": np.array([[0.4, 0.5, 0.6]], dtype=np.float32),
+                "robot_tracker_position_w": np.array([[0.25, -0.1, 0.9]], dtype=np.float32),
+                "robot_tracker_quaternion_xyzw": np.array([[0, 0, 0, 1]], dtype=np.float32),
+                "object_tracker_position_w": np.array([[0.75, 0.3, 0.25]], dtype=np.float32),
+                "object_tracker_quaternion_xyzw": np.array([[0, 0, 0, 1]], dtype=np.float32),
+            },
+            elapsed_s=np.array([1.25]),
+        )
+        config = twin_viewer.ViveDeploymentConfig.load(
+            SIM2REAL_ROOT / "config/g1/omnicontact_vive.json"
+        )
+        robot_root = twin_viewer._qpos_addr(model, "floating_base_joint")
+        box_root = twin_viewer._qpos_addr(model, "box")
+        box_dof = twin_viewer._dof_addr(model, "box")
+        tracker_robot = twin_viewer._qpos_addr(
+            model, "calib_robot_tracker_free"
+        )
+        tracker_object = twin_viewer._qpos_addr(
+            model, "calib_object_tracker_free"
+        )
+        exact = twin_viewer._apply_replay_frame(
+            replay,
+            0,
+            config=config,
+            model=model,
+            data=data,
+            robot_root=robot_root,
+            box_root=box_root,
+            box_dof=box_dof,
+            tracker_robot=tracker_robot,
+            tracker_object=tracker_object,
+            joint_qpos=joint_qpos,
+            joint_dof=joint_dof,
+            joint_columns=np.arange(29),
+            show_robot=True,
+        )
+        self.assertEqual(exact, (True, True))
+        np.testing.assert_allclose(data.qpos[joint_qpos], measured_q)
+        np.testing.assert_allclose(data.qvel[joint_dof], measured_dq)
+        np.testing.assert_allclose(
+            data.qpos[robot_root : robot_root + 3], [0.2, -0.1, 0.75]
+        )
+        np.testing.assert_allclose(
+            data.qpos[box_root : box_root + 3], [0.8, 0.3, 0.2]
+        )
+        np.testing.assert_allclose(
+            data.qpos[tracker_robot : tracker_robot + 3], [0.25, -0.1, 0.9]
+        )
+        np.testing.assert_allclose(
+            data.qpos[tracker_object : tracker_object + 3], [0.75, 0.3, 0.25]
+        )
+        np.testing.assert_allclose(
+            data.qvel[box_dof : box_dof + 6],
+            [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
         )
 
     def test_tracker_pyramid_faces_point_outward(self):

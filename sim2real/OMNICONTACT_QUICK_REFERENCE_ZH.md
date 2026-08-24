@@ -240,6 +240,39 @@ uv run src/sim2sim.py \
 
 窗口会标出任务世界、机器人 pelvis 和箱子三个局部坐标系；X 红、Y 绿、Z 蓝。
 
+按实测场景启动（推荐用于把实机布局带入 sim2sim）：
+
+```bash
+uv run --extra vive python src/sim2sim.py \
+  --robot g1 \
+  --bridge-config config/g1/bridge_omnicontact.yaml \
+  --initial-scene-source vive \
+  --vive-config config/g1/omnicontact_vive.json
+```
+
+该模式在启动时读取一次新鲜的 Vive 快照，并用标定世界系中的完整
+pelvis/箱子位姿初始化两个 MuJoCo free joint；同时把 JSON 的
+`goal_position_w` 随仿真状态发送给控制器。快照完成后 OpenVR 会关闭，后续
+pelvis 和箱子由 MuJoCo 物理独立演化，不会持续跟随或瞬移到真实 Tracker。
+采样时保持机器人和箱子静止，并确认窗口中的三个坐标轴和实物一致。
+
+对应的终端 2 不需要再单独填写目标点：
+
+```bash
+uv run src/deploy_omnicontact.py \
+  --robot g1 \
+  --pose-source sim \
+  --max-target-delta 1.0 \
+  --act \
+  --confirm-actuation ENABLE_MOTORS
+```
+
+目标优先级为：显式 `--goal-position` 覆盖值 → sim2sim 发布的 Vive JSON
+目标 → 兼容默认值 `[1.0, 1.0, 0.15]`。Vive JSON 的
+`object_half_extents_m` 必须与 MuJoCo 箱子尺寸一致，否则启动会拒绝该场景。
+该模式只导入机器人全局 pelvis 位姿，不导入实机关节角；仿真关节仍从
+OmniContact DefaultPose 开始。
+
 无窗口运行：
 
 ```bash
@@ -376,7 +409,48 @@ uv run src/deploy_omnicontact.py \
 
 文件名分别以 `bridge_` 和 `deploy_` 开头，并包含启动时间和进程 PID。启动时两个终端都会打印本次使用的完整日志路径。Python 日志额外记录：A 被接受时的完整位姿/新鲜度、Tracker 有效/无效更新累计数、CFGen 规划耗时、首帧策略耗时、控制命令最大间隔、异常堆栈，以及每一次 damping 的触发位置。bridge 日志保留 watchdog 锁存、命令频率、拒绝命令数和 DDS 输出信息。
 
-Python 还会自动生成同名的 `deploy_*.observations.npz` 压缩轨迹。它按策略控制帧保存：实际送入 ONNX 的 1244 维 observation、策略内部 5×141 历史、Tracker 的 pelvis/object 位置与四元数、物体线/角速度、位姿年龄与有效性、Tracker 有效/无效更新累计数、29 维关节位置/速度、IMU、29 维策略 action、限幅前/后的关节目标、kp/kd、策略耗时和命令间隔。bridge 超时时还会写入 `bridge_state_timeout` 终止行，并重新检查当时 Tracker 位姿是否仍新鲜；Tracker 遮挡则写入 `pose_pair_invalid_hold` 行。因此下次可直接区分 Tracker 遮挡、观测突变、策略输出异常、关节限幅和 bridge/DDS 断流。
+Python 还会自动生成同名的 `deploy_*.observations.npz` 压缩轨迹。v2 格式从 Zero Torque 开始按每个 bridge 控制状态记录完整启动过程，包括 DefaultPose、等待 B、LocoMode、等待 A、CFGen planning、CFTrackPolicy、结束和异常阶段。它保存两个 Tracker 在 SteamVR 原始坐标系及标定 world 坐标系中的实际变换、由其生成的 pelvis/object 位姿、物体线/角速度、位姿年龄与有效性、Tracker 有效/无效更新累计数、LowState 实测的 29 维 `q_lab/dq_lab`（不是关节目标）、IMU、实际送入 ONNX 的 1244 维 observation、策略内部 5×141 历史、29 维策略 action、限幅前/后的目标、kp/kd、策略耗时和命令间隔。bridge 超时时还会写入 `bridge_state_timeout` 终止行；Tracker 遮挡则写入 `pose_pair_invalid_hold` 行。因此下次可直接区分 Tracker 遮挡、观测突变、策略输出异常、关节限幅和 bridge/DDS 断流。
+
+#### 在 MuJoCo 中回放一次实机启动
+
+使用对应的结构化日志，不需要启动 SteamVR、G1 bridge 或 policy：
+
+```bash
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --replay-log ../logs/omnicontact/deploy_YYYYMMDD_HHMMSS_pidXXXX.observations.npz
+```
+
+`--replay-log` 也可以直接传同名 `deploy_*.log`，viewer 会自动查找旁边的 `deploy_*.observations.npz`。纯文本日志本身不含连续状态，若 companion 不存在会直接报出缺失路径。
+
+窗口按日志的原始单调时钟间隔同步回放：蓝/橙金字塔是两个 Tracker，pelvis 根位姿和 G1 关节使用当帧实测反馈，箱子使用当帧 runtime pose/velocity。终端进度条同时显示 `当前帧/总帧`、日志相对时间、原始墙钟时间、`state_packet_seq`、`policy_frame`、`event`、`task_state` 和 pose 有效性，可直接和同名 `deploy_*.log` 的时间及事件对照。
+
+回放按键：
+
+- `Space` 或 `P`：暂停/继续；
+- `N`：暂停并前进一帧；
+- `B`：暂停并后退一帧；
+- `R`：从第 0 帧重新播放。
+
+常用选项：
+
+```bash
+# 半速、从第 1200 帧开始并先暂停
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --vive-config config/g1/omnicontact_vive.json \
+  --replay-log ../logs/omnicontact/deploy_CASE.observations.npz \
+  --replay-speed 0.5 \
+  --replay-start-frame 1200 \
+  --replay-paused
+
+# 循环回放
+uv run --extra vive python scripts/real_omnicontact_viewer.py \
+  --replay-log ../logs/omnicontact/deploy_CASE.observations.npz \
+  --replay-loop
+```
+
+v1 旧轨迹仍可回放已有的 pelvis、箱子和实测关节，但旧格式没有保存两个 Tracker 本体，也没有覆盖启动前段；viewer 会用 pelvis/箱子和所选 Vive 标定反推 Tracker，并在终端显示警告。只有新生成的 v2 日志能对两个 Tracker 和完整启动过程进行原样回放。
 
 快速查看文件结构和故障末尾：
 

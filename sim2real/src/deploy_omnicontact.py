@@ -38,6 +38,7 @@ from paths import SIM2REAL_ROOT, controller_config_path, robot_config_path
 LOGGER = logging.getLogger("omnicontact.deploy")
 ACTUATION_CONFIRMATION = "ENABLE_MOTORS"
 DEFAULT_LOG_DIR = SIM2REAL_ROOT.parent / "logs" / "omnicontact"
+DEFAULT_SIM_GOAL_POSITION = np.array([1.0, 1.0, 0.15], dtype=np.float32)
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -142,9 +143,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--goal-position",
         type=float,
         nargs=3,
-        default=(1.0, 1.0, 0.15),
+        default=None,
         metavar=("X", "Y", "Z"),
-        help="sim pose mode only: desired box-center position in the MuJoCo world",
+        help=(
+            "sim pose mode only: override the desired box-center position; "
+            "otherwise use the goal published by sim2sim, then [1, 1, 0.15]"
+        ),
     )
     parser.add_argument("--vive-hz", type=float, default=100.0)
     parser.add_argument("--udp-bind", default="0.0.0.0")
@@ -258,6 +262,22 @@ def make_pose_provider(
     )
 
 
+def _resolve_goal_position(
+    args: argparse.Namespace,
+    vive_config: ViveDeploymentConfig | None,
+    client: MotionBridgeClient,
+) -> np.ndarray:
+    """Resolve goal precedence without letting real modes bypass calibration."""
+    if vive_config is not None:
+        return vive_config.goal_position_w.copy()
+    if args.goal_position is not None:
+        return np.asarray(args.goal_position, dtype=np.float32)
+    sim_goal = getattr(client, "sim_goal_position_w", None)
+    if sim_goal is not None:
+        return np.asarray(sim_goal, dtype=np.float32).copy()
+    return DEFAULT_SIM_GOAL_POSITION.copy()
+
+
 def _policy_state(state: BridgeState) -> RobotPolicyState:
     return RobotPolicyState(
         q_lab=state.q_lab,
@@ -294,6 +314,44 @@ def _fresh_pair(provider, *, max_age_s: float, min_confidence: float):
     return robot_pose, object_pose, valid
 
 
+def _record_runtime_event(
+    recorder: ObservationHistoryRecorder | None,
+    *,
+    state: BridgeState,
+    provider,
+    event: str,
+    task_state: str,
+    pose_max_age_s: float,
+    min_pose_confidence: float,
+    policy_frame: int = -1,
+    raw_command: PDCommand | None = None,
+    safe_command: PDCommand | None = None,
+    command_gap_ms: float = np.nan,
+) -> None:
+    """Record non-policy phases with the same runtime-state replay schema."""
+    if recorder is None or recorder.disabled or provider is None:
+        return
+    robot_pose, object_pose, valid = _fresh_pair(
+        provider,
+        max_age_s=pose_max_age_s,
+        min_confidence=min_pose_confidence,
+    )
+    _record_history_safely(
+        recorder,
+        state=state,
+        provider=provider,
+        policy_frame=policy_frame,
+        event=event,
+        task_state=task_state,
+        pose_pair_valid=valid,
+        robot_pose=robot_pose,
+        object_pose=object_pose,
+        raw_command=raw_command,
+        safe_command=safe_command,
+        command_gap_ms=command_gap_ms,
+    )
+
+
 def _wait_for_bridge(client: MotionBridgeClient, timeout_s: float) -> BridgeState:
     LOGGER.info("Waiting for G1 bridge state...")
     deadline = time.monotonic() + timeout_s
@@ -311,11 +369,31 @@ def _zero_torque_until_start(
     initial_state: BridgeState,
     *,
     state_timeout_s: float,
+    provider=None,
+    history_recorder: ObservationHistoryRecorder | None = None,
+    pose_max_age_s: float = 0.1,
+    min_pose_confidence: float = 0.0,
 ) -> BridgeState:
     LOGGER.warning("ZERO TORQUE: press Start to begin original DefaultPose")
     state = initial_state
+    zero_command = PDCommand(
+        np.zeros(29, dtype=np.float32),
+        np.zeros(29, dtype=np.float32),
+        np.zeros(29, dtype=np.float32),
+    )
     while not state.buttons["start"]:
         client.send_zero(state)
+        _record_runtime_event(
+            history_recorder,
+            state=state,
+            provider=provider,
+            event="zero_torque_wait_start",
+            task_state="zero_torque",
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
+            safe_command=zero_command,
+            command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
+        )
         next_state = client.read_next(state_timeout_s)
         if next_state is None:
             raise RuntimeError("lost G1 bridge state while waiting for Start")
@@ -337,6 +415,10 @@ def _move_to_default(
     prepare_seconds: float,
     control_freq: float,
     state_timeout_s: float,
+    provider=None,
+    history_recorder: ObservationHistoryRecorder | None = None,
+    pose_max_age_s: float = 0.1,
+    min_pose_confidence: float = 0.0,
 ) -> BridgeState:
     LOGGER.warning("Moving to original DefaultPose over %.2f seconds", prepare_seconds)
     start_q = state.q_lab.copy()
@@ -350,10 +432,23 @@ def _move_to_default(
             raise KeyboardInterrupt
         alpha = float(index + 1) / float(steps)
         target = start_q * (1.0 - alpha) + policy.default_pose_lab * alpha
+        command = PDCommand(target, policy.default_kp_lab, policy.default_kd_lab)
         client.send(
-            PDCommand(target, policy.default_kp_lab, policy.default_kd_lab),
+            command,
             enable=1,
             state=state,
+        )
+        _record_runtime_event(
+            history_recorder,
+            state=state,
+            provider=provider,
+            event="default_pose_transition",
+            task_state="default_pose",
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
+            raw_command=command,
+            safe_command=command,
+            command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
         )
     LOGGER.warning(
         "PHASE default_pose_reached: transition complete at state_seq=%d "
@@ -373,6 +468,10 @@ def _wait_for_loco_start(
     limiter: CommandLimiter,
     *,
     state_timeout_s: float,
+    provider=None,
+    history_recorder: ObservationHistoryRecorder | None = None,
+    pose_max_age_s: float = 0.1,
+    min_pose_confidence: float = 0.0,
 ) -> BridgeState:
     default_command = PDCommand(
         policy.default_pose_lab,
@@ -390,18 +489,45 @@ def _wait_for_loco_start(
         if client.button_rise.get("B", False):
             loco_mode.reset()
             limiter.reset(state.q_lab)
-            client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
+            raw_command = loco_mode.compute(state)
+            safe_command = limiter.apply(raw_command)
+            client.send(safe_command, enable=1, state=state)
+            _record_runtime_event(
+                history_recorder,
+                state=state,
+                provider=provider,
+                event="loco_mode_start",
+                task_state="loco_mode_standing",
+                pose_max_age_s=pose_max_age_s,
+                min_pose_confidence=min_pose_confidence,
+                raw_command=raw_command,
+                safe_command=safe_command,
+                command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
+            )
             LOGGER.warning(
                 "PHASE default_pose->loco_standing: B accepted at state_seq=%d",
                 state.packet_seq,
             )
             return state
         client.send(default_command, enable=1, state=state)
+        _record_runtime_event(
+            history_recorder,
+            state=state,
+            provider=provider,
+            event="default_pose_wait_b",
+            task_state="default_pose",
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
+            raw_command=default_command,
+            safe_command=default_command,
+            command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
+        )
 
 
 def _plan_while_holding(
     client: MotionBridgeClient,
     state: BridgeState,
+    provider,
     policy: OmniContactCarryPolicy,
     loco_mode: LocoModePolicy,
     limiter: CommandLimiter,
@@ -410,6 +536,9 @@ def _plan_while_holding(
     goal: TaskGoal,
     *,
     state_timeout_s: float,
+    history_recorder: ObservationHistoryRecorder | None = None,
+    pose_max_age_s: float = 0.1,
+    min_pose_confidence: float = 0.0,
 ) -> BridgeState:
     error: list[BaseException] = []
     plan_start = time.monotonic()
@@ -431,7 +560,21 @@ def _plan_while_holding(
         state = next_state
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
-        client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
+        raw_command = loco_mode.compute(state)
+        safe_command = limiter.apply(raw_command)
+        client.send(safe_command, enable=1, state=state)
+        _record_runtime_event(
+            history_recorder,
+            state=state,
+            provider=provider,
+            event="cfgen_planning",
+            task_state="loco_mode_standing",
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
+            raw_command=raw_command,
+            safe_command=safe_command,
+            command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
+        )
     worker.join()
     if error:
         raise RuntimeError(f"initial carry reference generation failed: {error[0]}") from error[0]
@@ -460,6 +603,7 @@ def _wait_for_task_start(
     pose_max_age_s: float,
     min_pose_confidence: float,
     state_timeout_s: float,
+    history_recorder: ObservationHistoryRecorder | None = None,
 ) -> BridgeState:
     LOGGER.warning(
         "LocoMode standing active; release the robot, then press A with fresh "
@@ -471,7 +615,21 @@ def _wait_for_task_start(
         if next_state is None:
             raise RuntimeError("lost G1 bridge state while waiting for A")
         state = next_state
-        client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
+        raw_command = loco_mode.compute(state)
+        safe_command = limiter.apply(raw_command)
+        client.send(safe_command, enable=1, state=state)
+        _record_runtime_event(
+            history_recorder,
+            state=state,
+            provider=provider,
+            event="loco_mode_wait_a",
+            task_state="loco_mode_standing",
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
+            raw_command=raw_command,
+            safe_command=safe_command,
+            command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
+        )
         if client.button_rise.get("stop", False):
             raise KeyboardInterrupt
         if not client.button_rise.get("A", False):
@@ -511,6 +669,7 @@ def _wait_for_task_start(
         return _plan_while_holding(
             client,
             state,
+            provider,
             policy,
             loco_mode,
             limiter,
@@ -518,6 +677,9 @@ def _wait_for_task_start(
             object_pose,
             goal,
             state_timeout_s=state_timeout_s,
+            history_recorder=history_recorder,
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
         )
 
 
@@ -581,6 +743,18 @@ def _run_no_actuation(
             if policy.should_replan(object_pose, goal):
                 policy.request_replan(robot_pose, object_pose, goal)
         else:
+            if history_recorder is not None and not history_recorder.disabled:
+                _record_history_safely(
+                    history_recorder,
+                    state=state,
+                    provider=provider,
+                    policy_frame=policy.frame,
+                    event="pose_pair_invalid_no_actuation",
+                    task_state="tracking_frozen",
+                    pose_pair_valid=False,
+                    robot_pose=robot_pose,
+                    object_pose=object_pose,
+                )
             stale_steps += 1
         now = time.monotonic()
         if now - last_log >= 1.0:
@@ -651,6 +825,16 @@ def _run_actuated(
             raise RuntimeError("lost G1 bridge state; damping command sent")
         state = next_state
         if client.button_rise.get("stop", False):
+            _record_runtime_event(
+                history_recorder,
+                state=state,
+                provider=provider,
+                event="operator_stop",
+                task_state=mode,
+                pose_max_age_s=pose_max_age_s,
+                min_pose_confidence=min_pose_confidence,
+                policy_frame=getattr(policy, "frame", -1),
+            )
             LOGGER.warning(
                 "Stop accepted during tracking at state_seq=%d frame=%d",
                 state.packet_seq,
@@ -666,12 +850,26 @@ def _run_actuated(
             raise RuntimeError(f"pose provider failed: {provider.error}") from provider.error
 
         if mode == "standing":
-            safe_command = limiter.apply(loco_mode.compute(state))
+            raw_command = loco_mode.compute(state)
+            safe_command = limiter.apply(raw_command)
             client.send(
                 safe_command,
                 enable=1,
                 state=state,
                 visualization=last_visualization,
+            )
+            _record_runtime_event(
+                history_recorder,
+                state=state,
+                provider=provider,
+                event="loco_mode_after_trajectory",
+                task_state="loco_mode_standing",
+                pose_max_age_s=pose_max_age_s,
+                min_pose_confidence=min_pose_confidence,
+                policy_frame=getattr(policy, "frame", -1),
+                raw_command=raw_command,
+                safe_command=safe_command,
+                command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
             )
             now = time.monotonic()
             if now - last_log >= 1.0:
@@ -914,6 +1112,26 @@ def main() -> int:
                 "control_frequency_hz": control_freq,
                 "pose_max_age_ms": pose_max_age_s * 1000.0,
                 "minimum_pose_confidence": min_pose_confidence,
+                "vive_calibration": None
+                if vive_config is None
+                else {
+                    "robot_tracker_serial": vive_config.robot_tracker_serial,
+                    "object_tracker_serial": vive_config.object_tracker_serial,
+                    "world_from_steamvr": {
+                        "position_m": vive_config.world_from_steamvr.position.tolist(),
+                        "quaternion_xyzw": vive_config.world_from_steamvr.quaternion_xyzw.tolist(),
+                    },
+                    "robot_tracker_to_pelvis": {
+                        "position_m": vive_config.robot_tracker_to_pelvis.position.tolist(),
+                        "quaternion_xyzw": vive_config.robot_tracker_to_pelvis.quaternion_xyzw.tolist(),
+                    },
+                    "object_tracker_to_object": {
+                        "position_m": vive_config.object_tracker_to_object.position.tolist(),
+                        "quaternion_xyzw": vive_config.object_tracker_to_object.quaternion_xyzw.tolist(),
+                    },
+                    "object_half_extents_m": vive_config.object_half_extents_m.tolist(),
+                    "goal_position_w": vive_config.goal_position_w.tolist(),
+                },
             },
         )
     )
@@ -943,11 +1161,7 @@ def main() -> int:
         )
         if not valid:
             raise RuntimeError("initial robot/object pose pair is not fresh")
-        goal_position = (
-            np.asarray(args.goal_position, dtype=np.float32)
-            if vive_config is None
-            else vive_config.goal_position_w
-        )
+        goal_position = _resolve_goal_position(args, vive_config, client)
         LOGGER.warning(
             "Pose sanity: pelvis=%s object=%s goal=%s",
             robot_pose.position_w,
@@ -992,6 +1206,10 @@ def main() -> int:
             client,
             last_state,
             state_timeout_s=state_timeout_s,
+            provider=provider,
+            history_recorder=history_recorder,
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
         )
         last_state = _move_to_default(
             client,
@@ -1000,6 +1218,10 @@ def main() -> int:
             prepare_seconds=prepare_seconds,
             control_freq=control_freq,
             state_timeout_s=state_timeout_s,
+            provider=provider,
+            history_recorder=history_recorder,
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
         )
         last_state = _wait_for_loco_start(
             client,
@@ -1008,6 +1230,10 @@ def main() -> int:
             loco_mode,
             limiter,
             state_timeout_s=state_timeout_s,
+            provider=provider,
+            history_recorder=history_recorder,
+            pose_max_age_s=pose_max_age_s,
+            min_pose_confidence=min_pose_confidence,
         )
         last_state = _wait_for_task_start(
             client,
@@ -1020,6 +1246,7 @@ def main() -> int:
             pose_max_age_s=pose_max_age_s,
             min_pose_confidence=min_pose_confidence,
             state_timeout_s=state_timeout_s,
+            history_recorder=history_recorder,
         )
         last_state = _run_actuated(
             client,
@@ -1066,11 +1293,29 @@ def main() -> int:
                     getattr(client, "max_command_gap_ms", 0.0),
                     final_state.packet_seq,
                 )
+                damping_kd = float(
+                    _section(omni_config, "safety").get("damping_kd", 8.0)
+                )
                 client.send_damping(
                     final_state,
-                    damping_kd=float(
-                        _section(omni_config, "safety").get("damping_kd", 8.0)
-                    ),
+                    damping_kd=damping_kd,
+                )
+                damping_command = PDCommand(
+                    np.zeros(29, dtype=np.float32),
+                    np.zeros(29, dtype=np.float32),
+                    np.full(29, damping_kd, dtype=np.float32),
+                )
+                _record_runtime_event(
+                    history_recorder,
+                    state=final_state,
+                    provider=provider,
+                    event="final_damping",
+                    task_state=termination_reason,
+                    pose_max_age_s=pose_max_age_s,
+                    min_pose_confidence=min_pose_confidence,
+                    policy_frame=-1 if policy is None else policy.frame,
+                    safe_command=damping_command,
+                    command_gap_ms=getattr(client, "last_command_gap_ms", np.nan),
                 )
                 LOGGER.warning("Final damping command sent")
             except Exception:

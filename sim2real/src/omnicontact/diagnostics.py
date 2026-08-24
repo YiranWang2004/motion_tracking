@@ -52,7 +52,7 @@ class ObservationHistoryRecorder:
     temporary compressed archive and atomically renames it into place.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     HISTORY_NAMES = (
         "end_effector_positions_torso_frame",
         "base_angular_velocity",
@@ -109,6 +109,16 @@ class ObservationHistoryRecorder:
                 "object_confidence",
                 "provider_valid_count",
                 "provider_invalid_count",
+                "tracker_diagnostics_exact",
+                "tracker_sample_wall_time_ns",
+                "robot_tracker_position_w",
+                "robot_tracker_quaternion_xyzw",
+                "object_tracker_position_w",
+                "object_tracker_quaternion_xyzw",
+                "robot_tracker_position_steamvr",
+                "robot_tracker_quaternion_xyzw_steamvr",
+                "object_tracker_position_steamvr",
+                "object_tracker_quaternion_xyzw_steamvr",
                 "observation",
                 "observation_history",
                 "policy_action",
@@ -228,6 +238,31 @@ class ObservationHistoryRecorder:
         )
         append("provider_valid_count", valid_count)
         append("provider_invalid_count", invalid_count)
+        tracker_snapshot = None
+        tracker_getter = getattr(provider, "get_tracker_diagnostics", None)
+        if callable(tracker_getter) and robot_pose is not None:
+            tracker_snapshot = tracker_getter(robot_pose.stamp_s)
+        append("tracker_diagnostics_exact", tracker_snapshot is not None)
+        append(
+            "tracker_sample_wall_time_ns",
+            -1
+            if tracker_snapshot is None
+            else int(tracker_snapshot["tracker_sample_wall_time_ns"]),
+        )
+        for name, size in (
+            ("robot_tracker_position_w", 3),
+            ("robot_tracker_quaternion_xyzw", 4),
+            ("object_tracker_position_w", 3),
+            ("object_tracker_quaternion_xyzw", 4),
+            ("robot_tracker_position_steamvr", 3),
+            ("robot_tracker_quaternion_xyzw_steamvr", 4),
+            ("object_tracker_position_steamvr", 3),
+            ("object_tracker_quaternion_xyzw_steamvr", 4),
+        ):
+            append(
+                name,
+                _vector(None if tracker_snapshot is None else tracker_snapshot[name], size),
+            )
         append("observation", _vector(observation, 1244))
         if observation_history is None:
             history = np.full((5, 141), np.nan, dtype=np.float32)
@@ -265,6 +300,14 @@ class ObservationHistoryRecorder:
             "object_half_extents",
             "object_linear_velocity_w",
             "object_angular_velocity_w",
+            "robot_tracker_position_w",
+            "robot_tracker_quaternion_xyzw",
+            "object_tracker_position_w",
+            "object_tracker_quaternion_xyzw",
+            "robot_tracker_position_steamvr",
+            "robot_tracker_quaternion_xyzw_steamvr",
+            "object_tracker_position_steamvr",
+            "object_tracker_quaternion_xyzw_steamvr",
             "observation",
             "observation_history",
             "policy_action",
@@ -273,7 +316,7 @@ class ObservationHistoryRecorder:
             "kp",
             "kd",
         }
-        bool_fields = {"pose_pair_valid"}
+        bool_fields = {"pose_pair_valid", "tracker_diagnostics_exact"}
         int64_fields = {
             "wall_time_ns",
             "monotonic_time_ns",
@@ -282,6 +325,7 @@ class ObservationHistoryRecorder:
             "state_packet_arrival_ns",
             "provider_valid_count",
             "provider_invalid_count",
+            "tracker_sample_wall_time_ns",
         }
         int32_fields = {"policy_frame"}
         for name, all_values in self._rows.items():
@@ -302,6 +346,14 @@ class ObservationHistoryRecorder:
                         "object_half_extents": (3,),
                         "object_linear_velocity_w": (3,),
                         "object_angular_velocity_w": (3,),
+                        "robot_tracker_position_w": (3,),
+                        "robot_tracker_quaternion_xyzw": (4,),
+                        "object_tracker_position_w": (3,),
+                        "object_tracker_quaternion_xyzw": (4,),
+                        "robot_tracker_position_steamvr": (3,),
+                        "robot_tracker_quaternion_xyzw_steamvr": (4,),
+                        "object_tracker_position_steamvr": (3,),
+                        "object_tracker_quaternion_xyzw_steamvr": (4,),
                     }.get(name, (29,))
                     arrays[name] = np.empty((0, *tail_shape), dtype=np.float32)
             elif name in bool_fields:
@@ -328,7 +380,16 @@ class ObservationHistoryRecorder:
                 "imu_quaternion_wxyz": "wxyz",
                 "robot_quaternion_xyzw": "xyzw",
                 "object_quaternion_xyzw": "xyzw",
+                "robot_tracker_quaternion_xyzw": "xyzw in calibrated world frame",
+                "object_tracker_quaternion_xyzw": "xyzw in calibrated world frame",
+                "robot_tracker_quaternion_xyzw_steamvr": "xyzw in SteamVR standing frame",
+                "object_tracker_quaternion_xyzw_steamvr": "xyzw in SteamVR standing frame",
             },
+            "runtime_replay": (
+                "q_lab is measured LowState feedback, never a target; Tracker world "
+                "transforms are the exact inputs used to derive robot/object poses when "
+                "tracker_diagnostics_exact is true"
+            ),
             "nan_semantics": "value was unavailable/not applicable for this event",
         }
         metadata = dict(self.metadata)

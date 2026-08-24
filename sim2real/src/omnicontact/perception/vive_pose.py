@@ -6,6 +6,7 @@ import json
 import math
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -217,6 +218,7 @@ class VivePoseProvider(ExternalObjectPoseProvider):
         self._last_object_stamp: float | None = None
         self.valid_updates = 0
         self.invalid_updates = 0
+        self._tracker_diagnostic_history: deque[dict[str, Any]] = deque(maxlen=32)
 
     @property
     def error(self) -> BaseException | None:
@@ -244,6 +246,21 @@ class VivePoseProvider(ExternalObjectPoseProvider):
         self._thread = None
         self.reader.stop()
         self.clear()
+        with self._lock:
+            self._tracker_diagnostic_history.clear()
+
+    def get_tracker_diagnostics(self, stamp_s: float | None) -> dict[str, Any] | None:
+        """Return the exact Tracker transforms used for one published pose pair."""
+        if stamp_s is None:
+            return None
+        with self._lock:
+            for snapshot in reversed(self._tracker_diagnostic_history):
+                if float(snapshot["stamp_s"]) == float(stamp_s):
+                    return {
+                        key: value.copy() if isinstance(value, np.ndarray) else value
+                        for key, value in snapshot.items()
+                    }
+        return None
 
     def wait_until_ready(self, timeout_s: float) -> bool:
         ready = self._ready_event.wait(timeout=max(0.0, timeout_s))
@@ -267,11 +284,13 @@ class VivePoseProvider(ExternalObjectPoseProvider):
             return False
 
         stamp = time.monotonic()
+        steamvr_from_robot_tracker = sample_to_transform(robot_sample)
+        steamvr_from_object_tracker = sample_to_transform(object_sample)
         world_from_robot_tracker = self.config.world_from_steamvr.compose(
-            sample_to_transform(robot_sample)
+            steamvr_from_robot_tracker
         )
         world_from_object_tracker = self.config.world_from_steamvr.compose(
-            sample_to_transform(object_sample)
+            steamvr_from_object_tracker
         )
         world_from_pelvis = world_from_robot_tracker.compose(
             self.config.robot_tracker_to_pelvis
@@ -309,7 +328,29 @@ class VivePoseProvider(ExternalObjectPoseProvider):
             linear_velocity_w=linear_velocity,
             angular_velocity_w=angular_velocity,
         )
-        self.publish_pair(robot_pose, object_pose)
+        tracker_wall_time_ns = int(robot_sample.sec) * 1_000_000_000 + int(
+            robot_sample.nsec
+        )
+        diagnostic_snapshot = {
+            "stamp_s": stamp,
+            "tracker_sample_wall_time_ns": tracker_wall_time_ns,
+            "robot_tracker_position_w": world_from_robot_tracker.position,
+            "robot_tracker_quaternion_xyzw": world_from_robot_tracker.quaternion_xyzw,
+            "object_tracker_position_w": world_from_object_tracker.position,
+            "object_tracker_quaternion_xyzw": world_from_object_tracker.quaternion_xyzw,
+            "robot_tracker_position_steamvr": steamvr_from_robot_tracker.position,
+            "robot_tracker_quaternion_xyzw_steamvr": steamvr_from_robot_tracker.quaternion_xyzw,
+            "object_tracker_position_steamvr": steamvr_from_object_tracker.position,
+            "object_tracker_quaternion_xyzw_steamvr": steamvr_from_object_tracker.quaternion_xyzw,
+        }
+        # Keep the calibrated pose pair and its source Tracker transforms in
+        # one lock epoch. The deployment loop may record a slightly older pair
+        # after the 100 Hz provider advances, so a short stamp-keyed ring is
+        # retained for exact lookup by the diagnostics recorder.
+        with self._lock:
+            self._robot_pose = robot_pose
+            self._pose = object_pose
+            self._tracker_diagnostic_history.append(diagnostic_snapshot)
         self._last_object_transform = world_from_object
         self._last_object_stamp = stamp
         self.valid_updates += 1

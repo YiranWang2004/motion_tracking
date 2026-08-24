@@ -1,4 +1,5 @@
 import argparse
+from dataclasses import dataclass
 import signal
 import sys
 import threading
@@ -19,6 +20,8 @@ from common.joint_mapper import JointMapper
 from common.udp_latest import LatestPacket
 from common.udp_transport import UDPRobotLow
 from common.utils import DictToClass, Timer
+from omnicontact.contracts import ObjectPose, RobotPose
+from omnicontact.perception.vive_pose import ViveDeploymentConfig, VivePoseProvider
 from paths import SUPPORTED_ROBOTS, bridge_config_path
 
 np.set_printoptions(formatter={"float": lambda x: "{0:0.2f}".format(x)})
@@ -56,6 +59,84 @@ def _as_vector(data, *, name: str, size: int | None = None, dtype=np.float64) ->
     return arr
 
 
+def _xyzw_pose_to_freejoint_qpos(
+    position_w: np.ndarray,
+    quaternion_xyzw: np.ndarray,
+) -> np.ndarray:
+    """Convert a calibrated world pose to MuJoCo free-joint qpos order."""
+    position = _as_vector(position_w, name="position_w", size=3)
+    quaternion = _as_vector(
+        quaternion_xyzw,
+        name="quaternion_xyzw",
+        size=4,
+    )
+    if not np.all(np.isfinite(position)) or not np.all(np.isfinite(quaternion)):
+        raise ValueError("initial scene pose contains non-finite values")
+    norm = float(np.linalg.norm(quaternion))
+    if norm < 1e-9:
+        raise ValueError("initial scene quaternion must be non-zero")
+    x, y, z, w = quaternion / norm
+    return np.concatenate((position, np.array([w, x, y, z], dtype=np.float64)))
+
+
+@dataclass(frozen=True)
+class InitialTaskScene:
+    """One calibrated perception snapshot used to seed an independent simulation."""
+
+    robot_pose: RobotPose
+    object_pose: ObjectPose
+    goal_position_w: np.ndarray
+
+    def __post_init__(self) -> None:
+        goal = _as_vector(
+            self.goal_position_w,
+            name="goal_position_w",
+            size=3,
+        )
+        if not np.all(np.isfinite(goal)):
+            raise ValueError("goal_position_w contains non-finite values")
+        object.__setattr__(self, "goal_position_w", goal.copy())
+
+
+def _capture_vive_initial_scene(
+    vive_config_path: str,
+    *,
+    poll_hz: float,
+    wait_timeout_s: float,
+    max_age_s: float,
+) -> InitialTaskScene:
+    """Capture one fresh calibrated Vive pair, then release the OpenVR session."""
+    if poll_hz <= 0.0 or wait_timeout_s <= 0.0 or max_age_s <= 0.0:
+        raise ValueError("Vive polling, wait timeout, and pose max age must be positive")
+    config = ViveDeploymentConfig.load(vive_config_path)
+    provider = VivePoseProvider(config, poll_hz=poll_hz)
+    try:
+        provider.start()
+        if not provider.wait_until_ready(wait_timeout_s):
+            raise RuntimeError(
+                "no complete Vive robot/object pose pair received within "
+                f"{wait_timeout_s:.1f}s"
+            )
+        robot_pose, object_pose = provider.get_poses()
+        if robot_pose is None or object_pose is None:
+            raise RuntimeError("Vive pose pair disappeared before scene initialization")
+        now = time.monotonic()
+        if (
+            not 0.0 <= now - robot_pose.stamp_s <= max_age_s
+            or not 0.0 <= now - object_pose.stamp_s <= max_age_s
+        ):
+            raise RuntimeError(
+                f"Vive pose pair is older than the {max_age_s:.3f}s initialization limit"
+            )
+        return InitialTaskScene(
+            robot_pose=robot_pose,
+            object_pose=object_pose,
+            goal_position_w=config.goal_position_w,
+        )
+    finally:
+        provider.stop()
+
+
 def _set_pre_control_marker_geometry(
     scene,
     *,
@@ -83,7 +164,12 @@ def _set_pre_control_marker_geometry(
 
 
 class Sim2Sim:
-    def __init__(self, args, config):
+    def __init__(
+        self,
+        args,
+        config,
+        initial_scene: InitialTaskScene | None = None,
+    ):
         self.args = args
         self.config = config
         self.robot = str(args.robot).lower()
@@ -196,6 +282,11 @@ class Sim2Sim:
             name="root_qpos_control",
             size=7,
         )
+        if initial_scene is not None:
+            self.root_qpos_control = _xyzw_pose_to_freejoint_qpos(
+                initial_scene.robot_pose.position_w,
+                initial_scene.robot_pose.quaternion_xyzw,
+            )
         marker_cfg = _cfg_value(config, "pre_control_marker", "pre_control_marker")
         marker_body_name = str(
             _cfg_value(marker_cfg, "body_name", "pre_control_marker.body_name")
@@ -263,6 +354,7 @@ class Sim2Sim:
         self.task_object_dof_address: int | None = None
         self.task_object_half_extents: np.ndarray | None = None
         self.task_object_initial_position: np.ndarray | None = None
+        self.task_goal_position_w: np.ndarray | None = None
         task_object_cfg = _cfg_value(config, "task_object", "task_object", None)
         if task_object_cfg is not None:
             body_name = str(_cfg_value(task_object_cfg, "body_name", "task_object.body_name"))
@@ -297,6 +389,31 @@ class Sim2Sim:
                 f"half_extents={self.task_object_half_extents.tolist()}"
             )
 
+        if initial_scene is not None:
+            if self.task_object_qpos_address is None:
+                raise ValueError(
+                    "Vive initial scene requires a configured free-joint task_object"
+                )
+            assert self.task_object_half_extents is not None
+            if not np.allclose(
+                initial_scene.object_pose.half_extents,
+                self.task_object_half_extents,
+                rtol=0.0,
+                atol=1e-4,
+            ):
+                raise ValueError(
+                    "Vive object_half_extents_m does not match the MuJoCo task object: "
+                    f"vive={initial_scene.object_pose.half_extents.tolist()} "
+                    f"mujoco={self.task_object_half_extents.tolist()}"
+                )
+            self.task_goal_position_w = initial_scene.goal_position_w.copy()
+            print(
+                f"{self.log_prefix} perceived initial scene: "
+                f"pelvis={initial_scene.robot_pose.position_w.tolist()}, "
+                f"object={initial_scene.object_pose.position_w.tolist()}, "
+                f"goal={self.task_goal_position_w.tolist()}"
+            )
+
         self.data.qpos[
             self.root_qpos_address : self.root_qpos_address + 7
         ] = self.root_qpos_control
@@ -306,6 +423,14 @@ class Sim2Sim:
             self.data.qpos[
                 self.task_object_qpos_address : self.task_object_qpos_address + 3
             ] = self.task_object_initial_position
+        if initial_scene is not None:
+            assert self.task_object_qpos_address is not None
+            self.data.qpos[
+                self.task_object_qpos_address : self.task_object_qpos_address + 7
+            ] = _xyzw_pose_to_freejoint_qpos(
+                initial_scene.object_pose.position_w,
+                initial_scene.object_pose.quaternion_xyzw,
+            )
         self.data.qvel[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
@@ -672,23 +797,26 @@ class Sim2Sim:
         object_qvel = self.data.qvel[
             self.task_object_dof_address : self.task_object_dof_address + 6
         ].copy()
-        return {
-            "sim_pose": {
-                "robot": {
-                    "position_w": root_qpos[:3].astype(np.float32),
-                    "quaternion_xyzw": self._wxyz_to_xyzw(root_qpos[3:7]),
-                },
-                "object": {
-                    "position_w": self.data.xpos[self.task_object_body_id].copy().astype(np.float32),
-                    "quaternion_xyzw": self._wxyz_to_xyzw(
-                        self.data.xquat[self.task_object_body_id]
-                    ),
-                    "half_extents": self.task_object_half_extents.copy(),
-                    "linear_velocity_w": object_qvel[:3].astype(np.float32),
-                    "angular_velocity_w": object_qvel[3:6].astype(np.float32),
-                },
-            }
+        sim_pose = {
+            "robot": {
+                "position_w": root_qpos[:3].astype(np.float32),
+                "quaternion_xyzw": self._wxyz_to_xyzw(root_qpos[3:7]),
+            },
+            "object": {
+                "position_w": self.data.xpos[self.task_object_body_id]
+                .copy()
+                .astype(np.float32),
+                "quaternion_xyzw": self._wxyz_to_xyzw(
+                    self.data.xquat[self.task_object_body_id]
+                ),
+                "half_extents": self.task_object_half_extents.copy(),
+                "linear_velocity_w": object_qvel[:3].astype(np.float32),
+                "angular_velocity_w": object_qvel[3:6].astype(np.float32),
+            },
         }
+        if self.task_goal_position_w is not None:
+            sim_pose["goal_position_w"] = self.task_goal_position_w.copy()
+        return {"sim_pose": sim_pose}
 
     def _publish_state_if_due(self):
         self._physics_tick += 1
@@ -940,11 +1068,48 @@ def main(argv=None):
     parser.add_argument("--xml_path", type=str, default=None)
     parser.add_argument("--bridge-config", type=str, default=None)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--initial-scene-source",
+        choices=("config", "vive"),
+        default="config",
+        help=(
+            "initialize pelvis/box from the bridge YAML or from one calibrated "
+            "Vive snapshot"
+        ),
+    )
+    parser.add_argument(
+        "--vive-config",
+        default=None,
+        help="calibrated deployment JSON required by --initial-scene-source vive",
+    )
+    parser.add_argument("--vive-hz", type=float, default=100.0)
+    parser.add_argument("--pose-wait-timeout", type=float, default=20.0)
+    parser.add_argument("--pose-max-age", type=float, default=0.10)
     args = parser.parse_args(argv)
+
+    if args.initial_scene_source == "vive" and not args.vive_config:
+        parser.error("--vive-config is required with --initial-scene-source vive")
+    for name in ("vive_hz", "pose_wait_timeout", "pose_max_age"):
+        if getattr(args, name) <= 0.0:
+            parser.error(f"--{name.replace('_', '-')} must be positive")
 
     config_path = args.bridge_config or str(bridge_config_path(args.robot))
     config = load_config(config_path)
-    Sim2Sim(args, config).run()
+    initial_scene = None
+    if args.initial_scene_source == "vive":
+        if _cfg_value(config, "task_object", "task_object", None) is None:
+            parser.error(
+                "--initial-scene-source vive requires a bridge config with task_object"
+            )
+        print("[Sim2Sim] Waiting for one fresh calibrated Vive scene snapshot...")
+        initial_scene = _capture_vive_initial_scene(
+            args.vive_config,
+            poll_hz=args.vive_hz,
+            wait_timeout_s=args.pose_wait_timeout,
+            max_age_s=args.pose_max_age,
+        )
+
+    Sim2Sim(args, config, initial_scene=initial_scene).run()
 
 
 if __name__ == "__main__":

@@ -120,6 +120,15 @@ class TestOmniContactVive(unittest.TestCase):
         robot, obj = provider.get_poses()
         np.testing.assert_allclose(robot.position_w, [1, 2, 2.9])
         np.testing.assert_allclose(obj.position_w, [4.1, 5, 6])
+        tracker = provider.get_tracker_diagnostics(robot.stamp_s)
+        self.assertIsNotNone(tracker)
+        self.assertEqual(tracker["tracker_sample_wall_time_ns"], 1_000_000_002)
+        np.testing.assert_allclose(
+            tracker["robot_tracker_position_w"], [1, 2, 3]
+        )
+        np.testing.assert_allclose(
+            tracker["object_tracker_position_w"], [4, 5, 6]
+        )
         self.assertFalse(provider.update_once())
         self.assertEqual(provider.get_poses(), (None, None))
 
