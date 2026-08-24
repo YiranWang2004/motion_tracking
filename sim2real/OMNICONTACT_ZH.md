@@ -152,10 +152,12 @@ uv run src/deploy_omnicontact.py \
 
 1. 等待控制器打印 `ZERO TORQUE`。
 2. 虚拟机器人已经按原版 DefaultPose 初始化。让 MuJoCo 窗口保持焦点并按 `s`；
-   此时立即解除躯干根部锁定并进入 MuJoCo 物理闭环，一个 50 Hz 控制周期后由
-   LocoMode 接管，不存在按 `s` 后的悬空或锁根阶段。红色圆柱会跟随在机器人
-   头顶，表示尚未进入 A 键后的策略。实机仍保留配置的 2 秒 DefaultPose 过渡。
-3. 等待控制器提示 `LocoMode standing` 已启动；此时由原版零速度 LocoMode
+   此时控制器进入并保持 DefaultPose，但 MuJoCo floating base 继续锁定。红色
+   圆柱会跟随在机器人头顶，表示尚未进入 A 键后的策略。实机仍保留配置的 2 秒
+   DefaultPose 过渡。
+3. 确认默认姿态稳定后在 MuJoCo 窗口按 `b`。仿真器会在收到该状态对应的首个
+   LocoMode 命令时同步释放 floating base。再等待控制器提示 `LocoMode standing`
+   已启动；此时由原版零速度 LocoMode
    持续站立，操作员可先释放机器人。
 4. 在 MuJoCo 窗口按 `a`，红色圆柱消失，生成 carry-box 参考并开始策略控制。
 5. 搬运过程中可以看到下蹲、抓取和放置动作，这是预期行为。
@@ -166,6 +168,7 @@ uv run src/deploy_omnicontact.py \
 
 ```text
 s -> start
+b -> B
 a -> A
 x -> stop
 ```
@@ -275,8 +278,8 @@ uv run --extra vive python src/deploy_omnicontact.py \
 2. 等待 `ZERO TORQUE`；
 3. 按 G1 遥控器 `Start`；
 4. 等待机器人移动到默认姿态；
-5. 确认机器人和箱子安全；
-6. 按 G1 遥控器 `A`；
+5. 按 G1 遥控器 `B` 进入 LocoMode，并确认机器人和箱子安全；
+6. 按 G1 遥控器 `A` 进入 OmniContact；
 7. 搬运过程中按 Stop/Select 停止并进入阻尼。
 
 ### 4.4 远程 Vive UDP 模式
@@ -778,6 +781,7 @@ xml_path: "assets/omnicontact_carry_box.xml"
 只有在以下条件同时满足时 A 才会生效：
 
 - 已经完成 Start 到默认姿态的过渡；
+- 已经按 B 进入 LocoMode；
 - 机器人 Tracker 和箱子 Tracker 都存在；
 - 位姿年龄不超过 `0.10 s`；
 - 置信度不低于 `0.90`。

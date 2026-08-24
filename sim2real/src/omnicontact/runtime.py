@@ -185,7 +185,7 @@ class MotionBridgeClient:
         raw_buttons = data.get("buttons", {})
         buttons = {
             name: bool(raw_buttons.get(name, False))
-            for name in ("start", "stop", "A", "up", "down")
+            for name in ("start", "stop", "A", "B", "up", "down")
         }
         if self._previous_buttons is None:
             self.button_rise = {name: False for name in buttons}

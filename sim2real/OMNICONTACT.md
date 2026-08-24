@@ -77,15 +77,17 @@ Then operate in this order:
 
 1. Wait for terminal 2 to print `ZERO TORQUE`.
 2. The virtual robot is already initialized at the original DefaultPose. In
-   terminal 1 press `s`; the floating base is released immediately, MuJoCo
-   physics starts, and LocoMode takes over after one 50 Hz control tick. A red
-   cylinder follows above its head to mark that the post-A policy has not
-   started yet. Real deployment keeps the configured 2-second DefaultPose
-   transition.
-3. Wait for terminal 2 to report that `LocoMode standing` is active. The
+   terminal 1 press `s`; the controller enters and holds DefaultPose while the
+   floating base remains locked. A red cylinder follows above its head to mark
+   that the post-A policy has not started yet. Real deployment keeps the
+   configured 2-second transition into DefaultPose.
+3. After DefaultPose is stable, press `b`. On the same state/command handshake,
+   the simulator releases the floating base and the controller activates its
+   first LocoMode command. Wait for terminal 2 to report that `LocoMode
+   standing` is active. The
    recurrent zero-velocity locomotion policy now supports the robot, so the
    operator can release it before starting the task.
-4. In terminal 1 press `a`; CFgen creates the carry-box reference while
+4. Press `a`; CFgen creates the carry-box reference while
    LocoMode remains active, then CFTrack control starts. The red cylinder
    disappears. A visible crouch during grasping and placing is expected.
 5. When the CFGen trajectory completes, control automatically returns to
@@ -235,10 +237,9 @@ uv run --extra vive python src/deploy_omnicontact.py \
   --confirm-actuation ENABLE_MOTORS
 ```
 
-The remote sequence is Start (zero torque to default-pose transition, then
-LocoMode standing), then A while both Tracker poses are fresh (start
-carry-box). CFGen completion automatically returns to LocoMode standing. Stop
-sends damping.
+The remote sequence is Start (zero torque to DefaultPose), B (enter LocoMode
+standing), then A while both Tracker poses are fresh (start carry-box). CFGen
+completion automatically returns to LocoMode standing. Stop sends damping.
 
 Both real-deployment processes persist a separate diagnostic log for every
 run under `<repository>/logs/omnicontact/`: `run_bridge.sh` writes a

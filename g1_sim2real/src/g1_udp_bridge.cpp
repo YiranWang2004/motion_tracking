@@ -412,6 +412,7 @@ struct RemoteState {
   bool start = false;
   bool stop = false;
   bool a = false;
+  bool b = false;
   bool up = false;
   bool down = false;
   float lx = 0.0f;
@@ -434,6 +435,7 @@ RemoteState parse_remote(const std::array<uint8_t, 40> & remote)
   out.start = (keys & (1U << 2)) != 0;
   out.stop = (keys & (1U << 3)) != 0;
   out.a = (keys & (1U << 8)) != 0;
+  out.b = (keys & (1U << 9)) != 0;
   out.up = (keys & (1U << 12)) != 0;
   out.down = (keys & (1U << 14)) != 0;
   out.lx = read_float_le(remote, 4);
@@ -567,8 +569,9 @@ class UdpLatestSender {
          << ",\"quat_wxyz\":" << ndarray_meta(quat_ref) << ",\"gyro\":" << ndarray_meta(gyro_ref)
          << ",\"linacc\":" << ndarray_meta(linacc_ref) << ",\"buttons\":{"
          << "\"start\":" << bool_text(remote.start) << ",\"stop\":" << bool_text(remote.stop)
-         << ",\"A\":" << bool_text(remote.a) << ",\"up\":" << bool_text(remote.up)
-         << ",\"down\":" << bool_text(remote.down) << "},\"sticks\":{";
+         << ",\"A\":" << bool_text(remote.a) << ",\"B\":" << bool_text(remote.b)
+         << ",\"up\":" << bool_text(remote.up) << ",\"down\":" << bool_text(remote.down)
+         << "},\"sticks\":{";
     meta << "\"lx\":";
     append_float_json(meta, remote.lx);
     meta << ",\"ly\":";
@@ -1276,7 +1279,7 @@ class G1UdpBridge {
   void stdin_button_loop()
   {
     ScopedTerminalRawMode raw_mode(STDIN_FILENO);
-    std::cout << "[G1Bridge] stdin buttons enabled: s=start, a=A, x=stop"
+    std::cout << "[G1Bridge] stdin buttons enabled: s=start, b=B, a=A, x=stop"
               << (raw_mode.enabled() ? " (single-key tty mode)" : " (line-buffered/pipe mode)") << std::endl;
 
     while (!stdin_button_stop_.load(std::memory_order_relaxed) &&
@@ -1325,6 +1328,8 @@ class G1UdpBridge {
     const char ch = static_cast<char>(std::tolower(static_cast<unsigned char>(input)));
     if (ch == 's') {
       pulse_stdin_button(stdin_start_until_ns_, "start");
+    } else if (ch == 'b') {
+      pulse_stdin_button(stdin_b_until_ns_, "B");
     } else if (ch == 'a') {
       pulse_stdin_button(stdin_a_until_ns_, "A");
     } else if (ch == 'x') {
@@ -1348,6 +1353,7 @@ class G1UdpBridge {
   {
     const uint64_t now = now_ns();
     remote.start = remote.start || stdin_button_active(stdin_start_until_ns_, now);
+    remote.b = remote.b || stdin_button_active(stdin_b_until_ns_, now);
     remote.a = remote.a || stdin_button_active(stdin_a_until_ns_, now);
     remote.stop = remote.stop || stdin_button_active(stdin_stop_until_ns_, now);
     return remote;
@@ -1798,6 +1804,7 @@ class G1UdpBridge {
   std::thread stdin_button_thread_;
   std::atomic<bool> stdin_button_stop_{false};
   std::atomic<uint64_t> stdin_start_until_ns_{0};
+  std::atomic<uint64_t> stdin_b_until_ns_{0};
   std::atomic<uint64_t> stdin_a_until_ns_{0};
   std::atomic<uint64_t> stdin_stop_until_ns_{0};
 

@@ -25,12 +25,13 @@ np.set_printoptions(formatter={"float": lambda x: "{0:0.2f}".format(x)})
 
 Keyboard2Button = {
     "a": "A",
+    "b": "B",
     "s": "start",
     "x": "stop",
     "u": "up",
     "d": "down",
 }
-BUTTON_KEYS = ("start", "stop", "A", "up", "down")
+BUTTON_KEYS = ("start", "stop", "A", "B", "up", "down")
 STICK_KEYS = ("lx", "ly", "rx", "ry")
 _MISSING = object()
 
@@ -238,6 +239,19 @@ class Sim2Sim:
         self.lockstep_policy = bool(
             _cfg_value(config, "lockstep_policy", "lockstep_policy", False)
         )
+        self.lock_root_until_loco_start = bool(
+            _cfg_value(
+                config,
+                "lock_root_until_loco_start",
+                "lock_root_until_loco_start",
+                False,
+            )
+        )
+        if self.lock_root_until_loco_start and not self.lockstep_policy:
+            raise ValueError(
+                "lock_root_until_loco_start requires lockstep_policy so root "
+                "release can wait for the first LocoMode command"
+            )
         self.lockstep_timeout_s = float(
             _cfg_value(config, "lockstep_timeout_s", "lockstep_timeout_s", 1.0)
         )
@@ -724,15 +738,28 @@ class Sim2Sim:
             state_timer.sleep()
 
     def simulate_control(self):
-        print(
-            'Root unlocked; running physical control on the ground.\n'
-            'The red cylinder marks the state before the post-A policy; '
-            'press "a" to switch policy.'
-        )
+        if self.lock_root_until_loco_start:
+            print(
+                'Root locked; holding DefaultPose on the ground.\n'
+                'Press "b" to release the root and enter LocoMode, then "a" '
+                'to enter OmniContact.'
+            )
+        else:
+            print(
+                'Root unlocked; running physical control on the ground.\n'
+                'The red cylinder marks the state before the post-A policy; '
+                'press "a" to switch policy.'
+            )
         timer = Timer(self.low_level_dt)
         time_start = time.time()
         last_log_time = time_start
         loop_count = 0
+        root_locked = self.lock_root_until_loco_start
+        locked_root_qpos = self.data.qpos[
+            self.root_qpos_address : self.root_qpos_address + 7
+        ].copy()
+        previous_b = bool(self._buttons_snapshot()["B"])
+        release_root_requested = False
 
         while self.is_alive:
             with self._cmd_lock:
@@ -741,15 +768,19 @@ class Sim2Sim:
                 kd_mujoco = self._policy_to_mujoco(self._kd_policy)
                 visualization = self._visualization_command
 
+            buttons = self._buttons_snapshot()
+            if root_locked and buttons["B"] and not previous_b:
+                release_root_requested = True
+            previous_b = bool(buttons["B"])
             with self._sim_lock:
                 self._step_control_locked(
                     ptargets_mujoco,
                     kp_mujoco,
                     kd_mujoco,
                     visualization,
+                    locked_root_qpos=locked_root_qpos if root_locked else None,
                 )
 
-            buttons = self._buttons_snapshot()
             if buttons["A"]:
                 self.pre_control_marker_visible = False
 
@@ -758,6 +789,10 @@ class Sim2Sim:
 
             state_time_ns = self._publish_state_if_due()
             self._wait_for_policy_command(state_time_ns)
+            if release_root_requested and state_time_ns is not None:
+                root_locked = False
+                release_root_requested = False
+                print('Root released; LocoMode command active.')
 
             if buttons["stop"]:
                 # Publish the stop edge once even when it falls between normal
@@ -795,8 +830,10 @@ class Sim2Sim:
         kp_mujoco: np.ndarray,
         kd_mujoco: np.ndarray,
         visualization: dict | None,
+        *,
+        locked_root_qpos: np.ndarray | None = None,
     ) -> None:
-        """Advance free-base physics once; never overwrite the robot root pose."""
+        """Advance physics once, optionally restoring a configured robot root pose."""
         self._apply_visualization_locked(visualization)
         qpos = self.data.qpos[self.mujoco_qpos_addresses].copy()
         qvel = self.data.qvel[self.mujoco_dof_addresses].copy()
@@ -804,6 +841,14 @@ class Sim2Sim:
         self.data.ctrl[:] = np.clip(ctrl, self.ctrl_lower, self.ctrl_upper)
         self._limit_external_forces()
         mujoco.mj_step(self.model, self.data)
+        if locked_root_qpos is not None:
+            self.data.qpos[
+                self.root_qpos_address : self.root_qpos_address + 7
+            ] = locked_root_qpos
+            self.data.qvel[
+                self.root_dof_address : self.root_dof_address + 6
+            ] = 0.0
+            mujoco.mj_forward(self.model, self.data)
 
     def _limit_external_forces(self):
         if self.max_external_force <= 0.0:

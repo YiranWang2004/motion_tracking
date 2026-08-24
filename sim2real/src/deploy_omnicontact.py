@@ -356,13 +356,47 @@ def _move_to_default(
             state=state,
         )
     LOGGER.warning(
-        "PHASE default_pose->loco_standing: transition complete at state_seq=%d "
+        "PHASE default_pose_reached: transition complete at state_seq=%d "
         "command_gap_ms=%.3f max_command_gap_ms=%.3f",
         state.packet_seq,
         getattr(client, "last_command_gap_ms", 0.0),
         getattr(client, "max_command_gap_ms", 0.0),
     )
     return state
+
+
+def _wait_for_loco_start(
+    client: MotionBridgeClient,
+    state: BridgeState,
+    policy: OmniContactCarryPolicy,
+    loco_mode: LocoModePolicy,
+    limiter: CommandLimiter,
+    *,
+    state_timeout_s: float,
+) -> BridgeState:
+    default_command = PDCommand(
+        policy.default_pose_lab,
+        policy.default_kp_lab,
+        policy.default_kd_lab,
+    )
+    LOGGER.warning("DefaultPose active; press B to enter LocoMode standing")
+    while True:
+        next_state = client.read_next(state_timeout_s)
+        if next_state is None:
+            raise RuntimeError("lost G1 bridge state while waiting for B")
+        state = next_state
+        if client.button_rise.get("stop", False):
+            raise KeyboardInterrupt
+        if client.button_rise.get("B", False):
+            loco_mode.reset()
+            limiter.reset(state.q_lab)
+            client.send(limiter.apply(loco_mode.compute(state)), enable=1, state=state)
+            LOGGER.warning(
+                "PHASE default_pose->loco_standing: B accepted at state_seq=%d",
+                state.packet_seq,
+            )
+            return state
+        client.send(default_command, enable=1, state=state)
 
 
 def _plan_while_holding(
@@ -427,8 +461,6 @@ def _wait_for_task_start(
     min_pose_confidence: float,
     state_timeout_s: float,
 ) -> BridgeState:
-    loco_mode.reset()
-    limiter.reset(state.q_lab)
     LOGGER.warning(
         "LocoMode standing active; release the robot, then press A with fresh "
         "robot/object poses to start carry-box"
@@ -967,6 +999,14 @@ def main() -> int:
             policy,
             prepare_seconds=prepare_seconds,
             control_freq=control_freq,
+            state_timeout_s=state_timeout_s,
+        )
+        last_state = _wait_for_loco_start(
+            client,
+            last_state,
+            policy,
+            loco_mode,
+            limiter,
             state_timeout_s=state_timeout_s,
         )
         last_state = _wait_for_task_start(

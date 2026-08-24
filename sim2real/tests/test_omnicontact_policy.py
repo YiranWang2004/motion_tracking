@@ -27,10 +27,19 @@ from omnicontact.visualization_udp import (
     decode_visualization,
     encode_visualization,
 )
-from deploy_omnicontact import _resolve_prepare_seconds, _run_actuated
+from deploy_omnicontact import (
+    _resolve_prepare_seconds,
+    _run_actuated,
+    _wait_for_loco_start,
+)
 from paths import SIM2REAL_ROOT
 from scripts import view_calibrated_omnicontact_poses as twin_viewer
-from sim2sim import Sim2Sim, _set_pre_control_marker_geometry
+from sim2sim import (
+    BUTTON_KEYS,
+    Keyboard2Button,
+    Sim2Sim,
+    _set_pre_control_marker_geometry,
+)
 
 
 class TestOmniContactPolicy(unittest.TestCase):
@@ -108,7 +117,7 @@ class TestOmniContactPolicy(unittest.TestCase):
                     controller["init_qpos"],
                 )
 
-    def test_sim_uses_one_tick_defaultpose_before_locomode(self):
+    def test_sim_uses_one_tick_defaultpose_transition(self):
         safety = {"prepare_seconds": 2.0, "sim_prepare_seconds": 0.02}
         self.assertEqual(
             _resolve_prepare_seconds(
@@ -128,6 +137,101 @@ class TestOmniContactPolicy(unittest.TestCase):
             ),
             2.0,
         )
+
+    def test_defaultpose_holds_until_b_enters_locomode(self):
+        def bridge_state(sequence: int, **buttons: bool) -> BridgeState:
+            return BridgeState(
+                q_lab=np.full(29, float(sequence), dtype=np.float32),
+                dq_lab=np.zeros(29, dtype=np.float32),
+                quat_wxyz=np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32),
+                gyro=np.zeros(3, dtype=np.float32),
+                buttons={"stop": False, "A": False, "B": False, **buttons},
+                state_receive_time_ns=sequence,
+                packet_seq=sequence,
+                packet_arrival_ns=sequence,
+            )
+
+        class FakeClient:
+            def __init__(self):
+                self.states = iter(
+                    (
+                        bridge_state(2),
+                        bridge_state(3, A=True),
+                        bridge_state(4, B=True),
+                    )
+                )
+                self.previous = {"stop": False, "A": False, "B": False}
+                self.button_rise = {}
+                self.commands = []
+
+            def read_next(self, _timeout):
+                state = next(self.states)
+                self.button_rise = {
+                    name: not self.previous[name] and state.buttons[name]
+                    for name in self.previous
+                }
+                self.previous = {
+                    name: state.buttons[name] for name in self.previous
+                }
+                return state
+
+            def send(self, command, **_kwargs):
+                self.commands.append(command)
+
+        policy = SimpleNamespace(
+            default_pose_lab=np.linspace(-0.5, 0.5, 29, dtype=np.float32),
+            default_kp_lab=np.full(29, 40.0, dtype=np.float32),
+            default_kd_lab=np.full(29, 2.0, dtype=np.float32),
+        )
+
+        class FakeLocoMode:
+            def __init__(self):
+                self.reset_count = 0
+                self.compute_count = 0
+
+            def reset(self):
+                self.reset_count += 1
+
+            def compute(self, _state):
+                self.compute_count += 1
+                return PDCommand(
+                    np.full(29, 0.25, dtype=np.float32),
+                    np.ones(29, dtype=np.float32),
+                    np.ones(29, dtype=np.float32),
+                )
+
+        client = FakeClient()
+        loco_mode = FakeLocoMode()
+        limiter = CommandLimiter(
+            np.full(29, -10.0, dtype=np.float32),
+            np.full(29, 10.0, dtype=np.float32),
+            10.0,
+        )
+        final_state = _wait_for_loco_start(
+            client,
+            bridge_state(1),
+            policy,
+            loco_mode,
+            limiter,
+            state_timeout_s=1.0,
+        )
+
+        self.assertEqual(final_state.packet_seq, 4)
+        self.assertEqual(len(client.commands), 3)
+        for command in client.commands[:2]:
+            np.testing.assert_array_equal(command.target_pos, policy.default_pose_lab)
+            np.testing.assert_array_equal(command.kp, policy.default_kp_lab)
+            np.testing.assert_array_equal(command.kd, policy.default_kd_lab)
+        np.testing.assert_allclose(client.commands[2].target_pos, 0.25)
+        self.assertEqual(loco_mode.reset_count, 1)
+        self.assertEqual(loco_mode.compute_count, 1)
+
+    def test_sim_keyboard_exposes_b_without_changing_existing_bindings(self):
+        self.assertEqual(Keyboard2Button["s"], "start")
+        self.assertEqual(Keyboard2Button["b"], "B")
+        self.assertEqual(Keyboard2Button["a"], "A")
+        self.assertEqual(Keyboard2Button["x"], "stop")
+        self.assertIn("B", BUTTON_KEYS)
 
     def test_completed_cfgen_switches_to_locomode(self):
         def bridge_state(sequence: int, *, stop: bool = False) -> BridgeState:
@@ -266,6 +370,10 @@ class TestOmniContactPolicy(unittest.TestCase):
                 config_path = SIM2REAL_ROOT / relative_config
                 config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
                 self.assertNotIn("root_qpos_home", config)
+                self.assertEqual(
+                    bool(config.get("lock_root_until_loco_start", False)),
+                    relative_config == "config/g1/bridge_omnicontact.yaml",
+                )
                 root_pose = np.asarray(config["root_qpos_control"], dtype=np.float64)
                 self.assertLess(root_pose[2], 1.1)
 
@@ -311,7 +419,7 @@ class TestOmniContactPolicy(unittest.TestCase):
                 )
                 self.assertEqual(scene.ngeom, 0)
 
-    def test_sim_control_step_does_not_lock_the_robot_root(self):
+    def test_sim_control_step_root_lock_is_opt_in(self):
         config_path = SIM2REAL_ROOT / "config/g1/bridge.yaml"
         config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         model_path = (config_path.parent / config["xml_path"]).resolve()
@@ -345,6 +453,8 @@ class TestOmniContactPolicy(unittest.TestCase):
         sim = object.__new__(Sim2Sim)
         sim.model = model
         sim.data = data
+        sim.root_qpos_address = root_qpos_address
+        sim.root_dof_address = root_dof_address
         sim.mujoco_qpos_addresses = joint_qpos_addresses
         sim.mujoco_dof_addresses = joint_dof_addresses
         sim.ctrl_lower = np.full(model.nu, -np.inf)
@@ -371,6 +481,29 @@ class TestOmniContactPolicy(unittest.TestCase):
                 data.qpos[root_qpos_address : root_qpos_address + 3],
                 initial_root,
             )
+        )
+
+        data.qpos[root_qpos_address : root_qpos_address + 7] = root_pose
+        data.qvel[root_dof_address : root_dof_address + 6] = np.array(
+            [0.1, -0.2, 0.3, -0.4, 0.5, -0.6], dtype=np.float64
+        )
+        mujoco.mj_forward(model, data)
+        Sim2Sim._step_control_locked(
+            sim,
+            data.qpos[joint_qpos_addresses].copy(),
+            zeros,
+            zeros,
+            None,
+            locked_root_qpos=root_pose.copy(),
+        )
+        np.testing.assert_allclose(
+            data.qpos[root_qpos_address : root_qpos_address + 7],
+            root_pose,
+            atol=1e-12,
+        )
+        np.testing.assert_array_equal(
+            data.qvel[root_dof_address : root_dof_address + 6],
+            np.zeros(6),
         )
 
     def test_sim2sim_scene_has_world_pelvis_and_box_coordinate_axes(self):
@@ -656,6 +789,44 @@ class TestOmniContactPolicy(unittest.TestCase):
         np.testing.assert_allclose(robot.position_w, [0, 0, 0.793])
         np.testing.assert_allclose(obj.position_w, [1, 0, 0.15])
         self.assertEqual(robot.stamp_s, obj.stamp_s)
+
+    def test_bridge_client_detects_remote_b_rising_edge(self):
+        def packet(sequence: int, b_pressed: bool):
+            return SimpleNamespace(
+                seq=sequence,
+                recv_time_ns=sequence * 100,
+                data={
+                    "q": np.zeros(29, dtype=np.float32),
+                    "dq": np.zeros(29, dtype=np.float32),
+                    "quat_wxyz": np.array([1, 0, 0, 0], dtype=np.float32),
+                    "gyro": np.zeros(3, dtype=np.float32),
+                    "buttons": {"B": b_pressed},
+                    "state_receive_time_ns": sequence * 10,
+                },
+            )
+
+        class FakeTransport:
+            def __init__(self):
+                self.packets = iter((packet(1, False), packet(2, True)))
+
+            def read_next_state(self, **_kwargs):
+                return next(self.packets)
+
+        client = MotionBridgeClient.__new__(MotionBridgeClient)
+        client.transport = FakeTransport()
+        client.pose_sink = None
+        client.last_seq = None
+        client.skipped_packets = 0
+        client._previous_buttons = None
+        client.button_rise = {}
+        client.latest_state = None
+
+        first = client.read_next(1.0)
+        self.assertFalse(first.buttons["B"])
+        self.assertFalse(client.button_rise["B"])
+        second = client.read_next(1.0)
+        self.assertTrue(second.buttons["B"])
+        self.assertTrue(client.button_rise["B"])
 
     def test_sim_command_contains_scene_and_reference_visualization(self):
         class FakeTransport:

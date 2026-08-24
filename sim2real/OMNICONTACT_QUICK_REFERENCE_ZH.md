@@ -24,11 +24,12 @@ cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
 
 按键：
 
-| 环境 | 开始准备 | 开始任务 | 停止 |
-| --- | --- | --- | --- |
-| sim2sim MuJoCo 窗口 | `s` | `a` | `x` |
-| G1 遥控器 | `Start` | `A` | `Stop/Select` |
-| pelvis 滑条标定 | — | `S` 保存 JSON | 不按 `S` 退出则不保存 |
+| 环境 | 进入默认姿态 | 进入 LocoMode | 开始 OmniContact | 停止 |
+| --- | --- | --- | --- | --- |
+| sim2sim MuJoCo 窗口 | `s` | `b` | `a` | `x` |
+| G1 遥控器 | `Start` | `B` | `A` | `Stop/Select` |
+
+pelvis 滑条标定窗口中，`S` 表示保存 JSON；不按 `S` 退出则不保存。
 
 ## 1. 一次性安装和编译
 
@@ -261,7 +262,7 @@ uv run src/deploy_omnicontact.py \
   --confirm-actuation ENABLE_MOTORS
 ```
 
-这里的 `--act` 只控制 MuJoCo，不连接实机。机器人以原版 DefaultPose 在任务对应地面位置初始化；按 `s` 后立即解除躯干根部锁定并进入 MuJoCo 物理闭环，一个 50 Hz 控制周期后由 LocoMode 接管，不存在悬空阶段。头顶红色圆柱持续表示尚未进入 A 键后的策略。操作顺序：等待 `ZERO TORQUE` → MuJoCo 窗口按 `s`（立即释放根部）→ 等待 `LocoMode standing` 并确认机器人稳定 → 按 `a`（红色圆柱消失）启动 CFTrack → CFGen 结束后自动回到 LocoMode → 按 `x` 停止。实机流程仍使用配置的 2 秒 DefaultPose 过渡。
+这里的 `--act` 只控制 MuJoCo，不连接实机。机器人以原版 DefaultPose 在任务对应地面位置初始化；按 `s` 后进入并保持 DefaultPose，MuJoCo floating base 继续锁定；按 `b` 后，仿真器在收到首个 LocoMode 命令时同步释放 base。头顶红色圆柱持续表示尚未进入 A 键后的策略。操作顺序：等待 `ZERO TORQUE` → MuJoCo 窗口按 `s`（锁定 base 并保持 DefaultPose）→ 确认默认姿态稳定后按 `b`（同步释放 base 并进入 LocoMode）→ 等待 `LocoMode standing` 并确认机器人稳定 → 按 `a`（红色圆柱消失）启动 CFTrack → CFGen 结束后自动回到 LocoMode → 按 `x` 停止。实机流程仍使用配置的 2 秒 DefaultPose 过渡。
 
 只运行策略评估、不发送仿真命令：
 
@@ -363,7 +364,7 @@ uv run src/deploy_omnicontact.py \
   --act \
   --confirm-actuation ENABLE_MOTORS
 
-操作顺序：等待 `ZERO TORQUE` → 遥控器按 `Start` → 等待默认姿态完成 → 确认场地和箱子安全 → 按 `A` → `Stop/Select` 停止。
+操作顺序：等待 `ZERO TORQUE` → 遥控器按 `Start` → 等待默认姿态完成 → 按 `B` 进入 LocoMode → 确认场地、机器人和箱子安全 → 按 `A` 进入 OmniContact → `Stop/Select` 停止。
 
 ### 6.5 自动诊断日志
 

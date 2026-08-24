@@ -23,6 +23,10 @@ max_external_force: 30.0
 lockstep_policy: true
 lockstep_timeout_s: 1.0
 
+# Keep the floating base fixed while Start/S activates DefaultPose. B releases
+# it on the same state/command handshake that activates LocoMode.
+lock_root_until_loco_start: true
+
 # G1 limits in policy/lab joint order. The OmniContact XML uses torque
 # actuators with ctrllimited="false", so its zero ctrlrange is not a zero-
 # torque range.
@@ -74,7 +78,9 @@ home_q: [
   0.0, 0.0, 0.0, 0.0
 ]
 
-# The robot is initialized here on the ground. Pressing S releases the root.
+# The robot is initialized here on the ground. S enters DefaultPose while the
+# root remains locked; B releases the root and enters LocoMode; A enters
+# OmniContact.
 root_qpos_control: [0.0, 0.0, 0.793, 0.7071068, 0.0, 0.0, 0.7071068]
 
 pre_control_marker:
