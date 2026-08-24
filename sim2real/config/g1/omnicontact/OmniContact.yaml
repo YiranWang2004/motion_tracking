@@ -1,4 +1,5 @@
-onnx_path: "policy.onnx"
+onnx_path: "combine_50k.onnx"
+# onnx_path: "policy.onnx"
 
 # Loco planner replanning rate in policy ticks. If policy runs at 50Hz (dt=0.02),
 # then 10 ticks = 5Hz replanning.

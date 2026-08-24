@@ -125,7 +125,7 @@ class OmniContactCarryPolicy:
             model_cfg = yaml.safe_load(stream)
 
         self.session = ort.InferenceSession(
-            (self.asset_dir / "policy.onnx").as_posix(),
+            (self.asset_dir / str(model_cfg["onnx_path"])).as_posix(),
             providers=["CPUExecutionProvider"],
         )
         inputs = self.session.get_inputs()
