@@ -1,0 +1,35 @@
+# Coordinator-side configuration for the first two-G1 routing test.
+# Bridge YAML files live under g1_sim2real/config because the C++ executable
+# loads them directly.  The two UDP endpoint pairs must remain unique.
+state_timeout_s: 0.20
+max_state_skew_s: 0.05
+duration_s: 2.0
+fail_closed: true
+
+robot_a:
+  bridge_config: "../../../g1_sim2real/config/bridge_omnicontact_a.yaml"
+  controller_config: "controller.yaml"
+  udp:
+    state_bind_host: "10.201.1.1"
+    state_port: 55001
+    cmd_host: "10.201.1.2"
+    cmd_port: 55002
+  # left_elbow_joint in controller.yaml:policy_joint_names
+  test_joint_index: 21
+  test_offset_rad: 0.03
+  max_target_delta: 0.005
+  damping_kd: 8.0
+
+robot_b:
+  bridge_config: "../../../g1_sim2real/config/bridge_omnicontact_b.yaml"
+  controller_config: "controller.yaml"
+  udp:
+    state_bind_host: "10.201.2.1"
+    state_port: 55101
+    cmd_host: "10.201.2.2"
+    cmd_port: 55102
+  # left_elbow_joint in controller.yaml:policy_joint_names
+  test_joint_index: 21
+  test_offset_rad: -0.03
+  max_target_delta: 0.005
+  damping_kd: 8.0

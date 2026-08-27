@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "model_name": "dual_policy_placeholder",
+  "model_file": null,
+  "control_frequency_hz": 50,
+  "observation_shape": null,
+  "action_shape": [58],
+  "action_layout": "robot_a_29_then_robot_b_29",
+  "joint_order_source": "controller.yaml:policy_joint_names",
+  "action_type": "absolute_target_or_explicit_residual",
+  "action_scale": null,
+  "kp_source": "controller.yaml:kps",
+  "kd_source": "controller.yaml:kds",
+  "note": "Replace only after dual routing test passes; do not use as a deployable checkpoint."
+}

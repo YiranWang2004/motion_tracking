@@ -1,0 +1,24 @@
+{
+  "calibration_confirmed": false,
+  "robot_a_tracker_serial": "REPLACE_ROBOT_A_TRACKER",
+  "robot_b_tracker_serial": "REPLACE_ROBOT_B_TRACKER",
+  "object_tracker_serial": "REPLACE_OBJECT_TRACKER",
+  "world_from_steamvr": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "robot_a_tracker_to_pelvis": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "robot_b_tracker_to_pelvis": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "object_tracker_to_object": {
+    "position_m": [0.0, 0.0, 0.0],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "object_half_extents_m": [0.15, 0.15, 0.15],
+  "goal_position_w": [0.0, 1.0, 0.15]
+}

@@ -331,3 +331,12 @@ For UDP G1 sim2real, start `motion_select.py` in another terminal after `deploy.
 For VR G1 sim2real, start `serve_xrobot_teleop.py` before pressing remote `A`.
 
 **CAUTION**: Always test a motion in sim2sim before running it on hardware.
+
+## Dual G1 routing validation
+
+The `vive` branch also contains a policy-neutral two-robot routing skeleton.
+See [`sim2real/DUAL_G1_DEPLOYMENT.md`](sim2real/DUAL_G1_DEPLOYMENT.md) for the
+same-IP namespace setup, bridge A/B launch commands, and the required no-act
+then low-amplitude PD acceptance sequence.  The dual entry point is a routing
+test; it is not a replacement for the single-G1 OmniContact policy or a final
+Dual ScaleBFM checkpoint.
