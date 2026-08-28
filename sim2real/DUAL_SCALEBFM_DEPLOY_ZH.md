@@ -184,7 +184,8 @@ bash scripts/run_dual_scalebfm_viewer.sh \
 
 实时终端每秒打印 A、B、visual 三路数据年龄；超过默认 `500 ms` 会显示 `!`。这是 viewer
 告警，不代替 policy 中更严格的 `200 ms` bridge state 和 `100 ms` Tracker fail-closed 检查。
-# 与实机控制链严格对齐的 sim2sim
+
+## 8. 与实机控制链严格对齐的 sim2sim
 
 sim2sim 不运行另一份简化策略。它只用一个共享 MuJoCo 世界替换两台
 `g1_udp_bridge` 和三 Tracker Vive 输入；`deploy_dual_scalebfm_residual.py`、

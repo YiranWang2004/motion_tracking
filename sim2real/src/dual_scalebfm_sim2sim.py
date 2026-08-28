@@ -385,6 +385,17 @@ class DualScaleBFMSim2Sim:
             self.step_policy_interval(commands)
             self._snapshot_id += 1
             steps += 1
+            if steps % max(1, int(round(self.policy_hz))) == 0:
+                root_z = [
+                    float(self.data.qpos[binding.root_qpos + 2])
+                    for binding in self.bindings
+                ]
+                box_z = float(self.data.xpos[self.box_body, 2])
+                print(
+                    f"[sim2sim] steps={steps} sim_time={self.data.time:.2f}s "
+                    f"root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) box_z={box_z:.3f}",
+                    flush=True,
+                )
             if self._viewer is not None:
                 self._viewer.sync()
 
