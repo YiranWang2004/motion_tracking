@@ -71,7 +71,10 @@ G1 B: left_elbow_joint = initial_q[21] - 0.03 rad
 | 命令 UDP 端口 | `55002` | `55102` |
 | 状态镜像端口 | `55003` | `55103` |
 
-如果实机网口名称不同，应一次性替换本文命令和启动脚本环境变量，不能只改部分配置。
+这些是 [config/g1/dual_network.yaml](config/g1/dual_network.yaml) 中的默认值。实机网口名称
+不同只修改该文件的 `robot_a.interface`、`robot_b.interface` 和对应 `expected_mac`，不要再逐条
+修改命令或启动脚本。bridge 启动前会同时核对接口名和 MAC，防止 A/B 网口被交换。
+读取器还会检查 veth 地址与两个 bridge YAML 的 UDP 地址一致，避免出现两套配置源。
 
 ## 4. 阶段 0：代码与软件环境
 
@@ -132,7 +135,7 @@ ethtool -i enp11s0
 
 ## 6. 阶段 2：创建同 IP 隔离网络
 
-先查看脚本生成的命令；该脚本不会修改网络：
+先校验配置并预览拓扑；该命令不会修改网络：
 
 ```bash
 cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
@@ -141,35 +144,15 @@ bash scripts/setup_dual_network.sh
 
 关闭正在占用这两个接口的连接配置。若 NetworkManager 自动管理接口，应先确认连接名再断开，不能删除未知 connection profile。
 
-逐条执行：
+确认预览中的 A/B 网口和接线一致后，一条命令创建或修复整个拓扑：
 
 ```bash
-sudo ip netns add g1a
-sudo ip netns add g1b
-sudo ip link set enp10s0 netns g1a
-sudo ip link set enp11s0 netns g1b
-
-sudo ip netns exec g1a ip link set lo up
-sudo ip netns exec g1b ip link set lo up
-sudo ip netns exec g1a ip addr add 192.168.123.201/24 dev enp10s0
-sudo ip netns exec g1b ip addr add 192.168.123.201/24 dev enp11s0
-sudo ip netns exec g1a ip link set enp10s0 up
-sudo ip netns exec g1b ip link set enp11s0 up
-
-sudo ip link add veth-g1a type veth peer name veth-g1a-ns
-sudo ip link add veth-g1b type veth peer name veth-g1b-ns
-sudo ip link set veth-g1a-ns netns g1a
-sudo ip link set veth-g1b-ns netns g1b
-
-sudo ip addr add 10.201.1.1/24 dev veth-g1a
-sudo ip addr add 10.201.2.1/24 dev veth-g1b
-sudo ip link set veth-g1a up
-sudo ip link set veth-g1b up
-sudo ip netns exec g1a ip addr add 10.201.1.2/24 dev veth-g1a-ns
-sudo ip netns exec g1b ip addr add 10.201.2.2/24 dev veth-g1b-ns
-sudo ip netns exec g1a ip link set veth-g1a-ns up
-sudo ip netns exec g1b ip link set veth-g1b-ns up
+sudo bash scripts/setup_dual_network.sh --apply
+sudo bash scripts/setup_dual_network.sh --check
 ```
+
+`--apply` 可重复执行，不会删除或替换来源不明的半残 veth；遇到不完整拓扑会停止并要求人工检查。
+namespace 在重启后消失，因此每次主机重启后重新执行一次 `--apply`。
 
 检查：
 
@@ -219,6 +202,7 @@ sudo ip netns exec g1b ip neigh show dev enp11s0
 cd /home/yiranwang/TeleHuman/motion_tracking
 sed -n '1,40p' g1_sim2real/config/bridge_omnicontact_a.yaml
 sed -n '1,40p' g1_sim2real/config/bridge_omnicontact_b.yaml
+sed -n '1,80p' sim2real/config/g1/dual_network.yaml
 sed -n '1,50p' sim2real/config/g1/dual_omnicontact.yaml
 ```
 
@@ -243,19 +227,22 @@ release_required: true
 
 ## 9. 阶段 5：启动两个 bridge
 
-先支撑两台机器人。终端 A：
+先支撑两台机器人。推荐在一个终端同时启动，并让任一 bridge 退出时联动停止另一侧：
 
 ```bash
 cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
-G1_NET_A=enp10s0 G1_NETNS_A=g1a bash scripts/run_dual_bridge_a.sh
+bash scripts/run_dual_bridges.sh
 ```
 
-终端 B：
+需要分别观察或调试时，也可以使用两个终端：
 
 ```bash
-cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
-G1_NET_B=enp11s0 G1_NETNS_B=g1b bash scripts/run_dual_bridge_b.sh
+bash scripts/run_dual_bridge_a.sh
+bash scripts/run_dual_bridge_b.sh
 ```
+
+这三个脚本都自动读取 `dual_network.yaml`，日常命令不再传网口或 namespace。旧的
+`G1_NET_A/B`、`G1_NETNS_A/B` 只保留用于一次性的诊断覆盖。
 
 日志必须分别确认：
 
@@ -449,10 +436,10 @@ object_tracker_serial
 ## 16. 日常启动顺序
 
 1. 检查 A/B 标签、支撑、急停和区域。
-2. 创建/检查两个 namespace 和 veth。
+2. 执行 `sudo bash scripts/setup_dual_network.sh --apply` 创建/检查两个 namespace 和 veth。
 3. 分别 ping 两台 `192.168.123.164`。
-4. 启动 bridge A 并核对接口、端口和 lowstate。
-5. 启动 bridge B 并做相同核对。
+4. 执行 `bash scripts/run_dual_bridges.sh`，核对 A/B 接口、端口和 lowstate。
+5. 确认任一 bridge 退出会联动停止另一侧。
 6. 检查两路错误计数。
 7. 正式 policy 场景再启动 Vive 三 Tracker provider。
 8. 启动 coordinator dry-run。
@@ -464,15 +451,8 @@ object_tracker_serial
 先停止 coordinator 和两个 bridge，确认接口未被占用：
 
 ```bash
-sudo ip link del veth-g1a 2>/dev/null || true
-sudo ip link del veth-g1b 2>/dev/null || true
-sudo ip netns exec g1a ip link set enp10s0 netns 1
-sudo ip netns exec g1b ip link set enp11s0 netns 1
-sudo ip netns del g1a
-sudo ip netns del g1b
-sudo ip link set enp10s0 up
-sudo ip link set enp11s0 up
-ip -br link show enp10s0 enp11s0
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+sudo bash scripts/setup_dual_network.sh --teardown
 ```
 
 若接口由 NetworkManager 管理，按现场原配置恢复，不删除未知 profile。

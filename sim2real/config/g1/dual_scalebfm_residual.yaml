@@ -1,0 +1,95 @@
+control_frequency_hz: 50
+state_timeout_s: 0.20
+pose_timeout_s: 0.10
+max_state_skew_s: 0.05
+default_pose_duration_s: 2.0
+max_inference_time_s: 0.018
+max_consecutive_slow_ticks: 3
+log_directory: "../../logs/dual_scalebfm_residual"
+reference_alignment: "xyyaw"
+start_frame: 1
+control_mode: 7
+future_step: 5
+residual_scale: 0.10
+# Batch size is only two. On the current inference host CPU eager inference is
+# substantially faster than CUDA launch/synchronization (about 3.4 ms vs 25 ms).
+device: "cpu"
+inference_precision: "fp32"
+torch_num_threads: 4
+# Optional Linux logical CPU ids, for example [4, 5, 6, 7]. Empty means no pinning.
+cpu_affinity: []
+
+# Read-only MuJoCo twin stream. It is best-effort and never participates in
+# bridge command routing or motor safety decisions.
+visualization:
+  enabled: true
+  host: "127.0.0.1"
+  port: 55204
+
+# sim2sim replaces only the two C++/DDS bridges and Vive source. The deploy
+# entry, policy artifacts, coordinator, command limiters and safety path remain
+# exactly the same. Loopback-only ports make accidental robot actuation impossible.
+simulation:
+  xml_path: "assets/dual_scalebfm_sim.xml"
+  physical_frequency_hz: 200
+  startup_timeout_s: 60.0
+  lockstep_timeout_s: 1.0
+  state_retry_s: 0.05
+  disabled_damping_kd: 8.0
+  box_half_extents: [0.30, 0.15, 0.15]
+  robots:
+    robot_a:
+      udp:
+        state_bind_host: "127.0.0.1"
+        state_port: 56001
+        cmd_host: "127.0.0.1"
+        cmd_port: 56002
+      max_target_delta: 0.005
+      damping_kd: 8.0
+    robot_b:
+      udp:
+        state_bind_host: "127.0.0.1"
+        state_port: 56101
+        cmd_host: "127.0.0.1"
+        cmd_port: 56102
+      max_target_delta: 0.005
+      damping_kd: 8.0
+
+preflight:
+  max_partner_position_error_m: 0.20
+  max_object_position_error_m: 0.20
+  max_box_size_error_m: 0.03
+  max_robot_orientation_error_rad: 0.35
+  max_object_orientation_error_rad: 0.35
+
+artifacts:
+  directory: "dual_policy_artifacts"
+  manifest: "manifest.json"
+  scalebfm_checkpoint: "scalebfm_model.pt"
+  scalebfm_metadata: "scalebfm_metadata.json"
+  scalebfm_mode_table: "scalebfm_mode_table.pt"
+  residual_checkpoint: "residual_actor.pt"
+  reference_bundle: "reference_bundle.npz"
+  kinematics_xml: "g1_29dof_scalebfm.xml"
+
+joint_limits_source: "omnicontact/OmniContact.yaml"
+
+robot_a:
+  udp:
+    state_bind_host: "10.201.1.1"
+    state_port: 55001
+    cmd_host: "10.201.1.2"
+    cmd_port: 55002
+  max_target_delta: 0.005
+  damping_kd: 8.0
+
+robot_b:
+  udp:
+    state_bind_host: "10.201.2.1"
+    state_port: 55101
+    cmd_host: "10.201.2.2"
+    cmd_port: 55102
+  max_target_delta: 0.005
+  damping_kd: 8.0
+
+vive_config: "omnicontact_vive_dual.json"

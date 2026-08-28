@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -130,10 +130,12 @@ class MotionBridgeClient:
         *,
         pose_sink: BridgePoseProvider | None = None,
         visualization_sender: VisualizationSender | None = None,
+        state_observer: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self.transport = UDPRobotHigh(udp_config)
         self.pose_sink = pose_sink
         self.visualization_sender = visualization_sender
+        self.state_observer = state_observer
         self.last_seq: int | None = None
         self.skipped_packets = 0
         self._previous_buttons: dict[str, bool] | None = None
@@ -164,6 +166,10 @@ class MotionBridgeClient:
             self.skipped_packets += int(packet.seq - self.last_seq - 1)
         self.last_seq = int(packet.seq)
         data = packet.data
+        if not isinstance(data, dict):
+            raise RuntimeError("bridge returned a non-mapping state")
+        if self.state_observer is not None:
+            self.state_observer(data)
         q = np.asarray(data["q"], dtype=np.float32).reshape(-1)
         dq = np.asarray(data["dq"], dtype=np.float32).reshape(-1)
         quat = np.asarray(data["quat_wxyz"], dtype=np.float32).reshape(-1)

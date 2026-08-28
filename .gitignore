@@ -164,6 +164,7 @@ cython_debug/
 outputs/
 wandb/
 artifacts/
+sim2real/config/g1/dual_policy_artifacts/
 /logs/
 
 # nohup

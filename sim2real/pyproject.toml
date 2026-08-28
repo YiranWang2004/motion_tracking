@@ -23,6 +23,10 @@ dependencies = [
 vive = [
   "openvr==2.12.1401",
 ]
+dual-policy = [
+  "openvr==2.12.1401",
+  "torch>=2.4",
+]
 
 [tool.uv]
 # This repo is script-oriented; only manage deps/env with uv.

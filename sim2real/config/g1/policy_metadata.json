@@ -1,15 +1,23 @@
 {
   "schema_version": 1,
-  "model_name": "dual_policy_placeholder",
-  "model_file": null,
+  "model_name": "dual_g1_scalebfm_residual_object",
+  "model_file": "dual_policy_artifacts/residual_actor.pt",
   "control_frequency_hz": 50,
-  "observation_shape": null,
-  "action_shape": [58],
-  "action_layout": "robot_a_29_then_robot_b_29",
+  "observation_shape": [2, 201],
+  "action_shape": [2, 29],
+  "action_layout": "decentralized_robot_a_then_robot_b",
   "joint_order_source": "controller.yaml:policy_joint_names",
-  "action_type": "absolute_target_or_explicit_residual",
-  "action_scale": null,
-  "kp_source": "controller.yaml:kps",
-  "kd_source": "controller.yaml:kds",
-  "note": "Replace only after dual routing test passes; do not use as a deployable checkpoint."
+  "action_type": "scalebfm_absolute_target_plus_clamped_residual",
+  "action_scale": 0.1,
+  "kp_source": "dual_policy_artifacts/scalebfm_metadata.json:stiffness",
+  "kd_source": "dual_policy_artifacts/scalebfm_metadata.json:damping",
+  "checkpoint_contract": {
+    "actor_input_per_robot": 201,
+    "actor_output_per_robot": 29,
+    "actor_sharing": "shared",
+    "control_architecture": "decentralized",
+    "box_observation": "actual",
+    "residual_joints": "whole-body"
+  },
+  "manifest": "dual_policy_artifacts/manifest.json"
 }
