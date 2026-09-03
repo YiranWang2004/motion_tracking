@@ -790,7 +790,10 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     file=sys.stderr,
                 )
-            print("Replay keys: Space/P=pause, N=next frame, B=previous frame, R=restart.")
+            print(
+                "Replay keys: Space/P=pause, N=next frame, B=previous frame, "
+                "A=slower, D=faster, R=restart."
+            )
         if args.tune_robot_tracker_to_pelvis:
             tuner = RobotTrackerToPelvisTuner(
                 config.robot_tracker_to_pelvis,
@@ -829,6 +832,12 @@ def main(argv: list[str] | None = None) -> int:
                 progress_refresh[0] = True
             elif keycode in (ord("B"), ord("b")):
                 replay_clock.step(-1)
+                progress_refresh[0] = True
+            elif keycode in (ord("A"), ord("a")):
+                replay_clock.shift_speed(-1)
+                progress_refresh[0] = True
+            elif keycode in (ord("D"), ord("d")):
+                replay_clock.shift_speed(1)
                 progress_refresh[0] = True
             elif keycode in (ord("R"), ord("r")):
                 replay_clock.restart(paused=False)

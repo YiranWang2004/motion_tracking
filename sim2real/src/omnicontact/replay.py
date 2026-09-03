@@ -140,6 +140,8 @@ class OmniContactReplayLog:
 class ReplayClock:
     """Wall-clock synchronized replay with pause, stepping, restart and looping."""
 
+    SPEED_STEPS = (0.25, 0.5, 1.0, 5.0, 10.0)
+
     def __init__(
         self,
         replay: OmniContactReplayLog,
@@ -198,6 +200,44 @@ class ReplayClock:
                 self.index = self.replay.frame_index_at(target)
                 self.paused = True
             return self.paused
+
+    def set_speed(self, speed: float, now_s: float | None = None) -> float:
+        """Change speed without discontinuously moving the replay position."""
+        if speed <= 0.0:
+            raise ValueError("replay speed must be positive")
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self._lock:
+            if self.paused:
+                target = float(self.replay.elapsed_s[self.index])
+            else:
+                target = self._anchor_log_s + (
+                    now - self._anchor_wall_s
+                ) * self.speed
+                if target >= self.replay.duration_s:
+                    if self.loop and self.replay.duration_s > 0.0:
+                        target %= self.replay.duration_s
+                        self.finished = False
+                    else:
+                        target = self.replay.duration_s
+                        self.paused = True
+                        self.finished = True
+                self.index = self.replay.frame_index_at(target)
+            self.speed = float(speed)
+            self._anchor_wall_s = now
+            self._anchor_log_s = target
+            return self.speed
+
+    def shift_speed(self, direction: int, now_s: float | None = None) -> float:
+        """Move to the adjacent fixed speed step and return the selected speed."""
+        if direction == 0:
+            return self.speed
+        if direction < 0:
+            candidates = [step for step in self.SPEED_STEPS if step < self.speed]
+            speed = candidates[-1] if candidates else self.SPEED_STEPS[0]
+        else:
+            candidates = [step for step in self.SPEED_STEPS if step > self.speed]
+            speed = candidates[0] if candidates else self.SPEED_STEPS[-1]
+        return self.set_speed(speed, now_s=now_s)
 
     def step(self, delta: int, now_s: float | None = None) -> int:
         now = time.monotonic() if now_s is None else float(now_s)

@@ -796,6 +796,37 @@ class TestOmniContactPolicy(unittest.TestCase):
             self.assertEqual(old_replay.schema_version, 1)
             self.assertFalse(old_replay.has_recorded_trackers)
 
+    def test_replay_clock_switches_fixed_speed_steps_without_jumping(self):
+        elapsed_s = np.arange(6, dtype=np.float64)
+        replay = SimpleNamespace(
+            frame_count=elapsed_s.size,
+            duration_s=float(elapsed_s[-1]),
+            elapsed_s=elapsed_s,
+            frame_index_at=lambda elapsed: int(
+                np.clip(
+                    np.searchsorted(elapsed_s, elapsed, side="right") - 1,
+                    0,
+                    elapsed_s.size - 1,
+                )
+            ),
+        )
+        clock = ReplayClock(replay, paused=True)
+
+        self.assertEqual(clock.shift_speed(-1), 0.5)
+        self.assertEqual(clock.shift_speed(-1), 0.25)
+        self.assertEqual(clock.shift_speed(-1), 0.25)
+        self.assertEqual(clock.shift_speed(1), 0.5)
+        self.assertEqual(clock.shift_speed(1), 1.0)
+
+        clock.toggle_pause(now_s=10.0)
+        self.assertEqual(clock.update(now_s=11.0), 1)
+        self.assertEqual(clock.shift_speed(1, now_s=11.0), 5.0)
+        self.assertEqual(clock.index, 1)
+        self.assertEqual(clock.update(now_s=11.21), 2)
+        self.assertEqual(clock.shift_speed(1, now_s=11.21), 10.0)
+        self.assertEqual(clock.index, 2)
+        self.assertEqual(clock.shift_speed(1, now_s=11.21), 10.0)
+
     def test_empty_observation_history_recorder_has_stable_shapes(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "empty.observations.npz"
