@@ -5,11 +5,22 @@ from __future__ import annotations
 import json
 import threading
 import time
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Protocol
 
 import numpy as np
+
+
+class ReplayTimeline(Protocol):
+    """Minimal timeline interface shared by single- and dual-robot replays."""
+
+    frame_count: int
+    duration_s: float
+    elapsed_s: np.ndarray
+
+    def frame_index_at(self, elapsed_s: float) -> int: ...
 
 
 class OmniContactReplayLog:
@@ -144,7 +155,7 @@ class ReplayClock:
 
     def __init__(
         self,
-        replay: OmniContactReplayLog,
+        replay: ReplayTimeline,
         *,
         speed: float = 1.0,
         start_frame: int = 0,

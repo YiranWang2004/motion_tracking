@@ -43,34 +43,35 @@ from omnicontact.replay import (
     ReplayClock,
     format_replay_progress,
 )
+from omnicontact.viewer_style import (
+    AXIS_LENGTH,
+    AXIS_RADIUS,
+    PYRAMID_HEIGHT,
+    PYRAMID_SIDE,
+    axis_geoms_xml,
+    configure_camera,
+    pyramid_faces,
+    pyramid_vertices,
+)
 from omnicontact.visualization_udp import VisualizationReceiver
 
 
-AXIS_LENGTH = 0.22
-AXIS_RADIUS = 0.006
-PYRAMID_SIDE = 0.10
-PYRAMID_HEIGHT = 0.10
-
-
 def _pyramid_vertices() -> str:
-    h = PYRAMID_SIDE * 0.5
-    y0 = PYRAMID_SIDE * np.sqrt(3.0) / 6.0
-    y1 = PYRAMID_SIDE * np.sqrt(3.0) / 3.0
-    vertices = ((-h, -y0, 0.0), (h, -y0, 0.0), (0.0, y1, 0.0), (0.0, 0.0, -PYRAMID_HEIGHT))
-    return " ".join(f"{v:.9g}" for point in vertices for v in point)
+    """Compatibility wrapper for tests and downstream imports."""
+
+    return pyramid_vertices(PYRAMID_SIDE, PYRAMID_HEIGHT)
 
 
 def _pyramid_faces() -> str:
-    # Counter-clockwise when viewed from outside. MuJoCo culls backfaces, so
-    # inward-facing winding makes parts of this closed marker disappear.
-    return "0 1 2  0 3 1  1 3 2  2 3 0"
+    """Compatibility wrapper for tests and downstream imports."""
+
+    return pyramid_faces()
 
 
 def _axis_geoms(prefix: str) -> str:
-    return f'''\
-      <geom name="{prefix}_axis_x" type="capsule" fromto="0 0 0 {AXIS_LENGTH} 0 0" size="{AXIS_RADIUS}" contype="0" conaffinity="0" rgba="0.95 0.08 0.08 1"/>
-      <geom name="{prefix}_axis_y" type="capsule" fromto="0 0 0 0 {AXIS_LENGTH} 0" size="{AXIS_RADIUS}" contype="0" conaffinity="0" rgba="0.08 0.90 0.18 1"/>
-      <geom name="{prefix}_axis_z" type="capsule" fromto="0 0 0 0 0 {AXIS_LENGTH}" size="{AXIS_RADIUS}" contype="0" conaffinity="0" rgba="0.10 0.38 1 1"/>'''
+    """Compatibility wrapper for tests and downstream imports."""
+
+    return axis_geoms_xml(prefix, length_m=AXIS_LENGTH, radius_m=AXIS_RADIUS)
 
 
 def _expanded_xml(xml_path: Path) -> str:
@@ -857,10 +858,7 @@ def main(argv: list[str] | None = None) -> int:
             show_left_ui=False,
             show_right_ui=False,
         ) as viewer:
-            viewer.cam.lookat[:] = (0.8, 0.0, 0.8)
-            viewer.cam.distance = 3.0
-            viewer.cam.azimuth = 135.0
-            viewer.cam.elevation = -18.0
+            configure_camera(viewer.cam)
             while viewer.is_running():
                 started = time.monotonic()
                 if replay is not None:

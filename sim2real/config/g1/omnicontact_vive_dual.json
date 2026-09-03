@@ -1,23 +1,59 @@
 {
-  "calibration_confirmed": false,
-  "robot_a_tracker_serial": "REPLACE_ROBOT_A_TRACKER",
-  "robot_b_tracker_serial": "REPLACE_ROBOT_B_TRACKER",
-  "object_tracker_serial": "REPLACE_OBJECT_TRACKER",
+  "calibration_confirmed": true,
+  "robot_a_tracker_serial": "LHR-FBB3FF7D",
+  "robot_b_tracker_serial": "LHR-F0185780",
+  "object_tracker_serial": "LHR-AFB66641",
   "world_from_steamvr": {
-    "position_m": [0.0, 0.0, 0.0],
-    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+    "position_m": [
+      1.4574276050899497,
+      -1.7679652486719488,
+      1.914125070679859
+    ],
+    "quaternion_xyzw": [
+      -0.5983416773781147,
+      -0.36723366687943937,
+      -0.37175668690190267,
+      -0.6073908434989336
+    ]
   },
   "robot_a_tracker_to_pelvis": {
-    "position_m": [0.0, 0.0, 0.0],
-    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+    "position_m": [
+      0.002,
+      -0.078,
+      0.058
+    ],
+    "quaternion_xyzw": [
+      0.5,
+      -0.5,
+      0.4999999999999999,
+      0.5000000000000001
+    ]
   },
   "robot_b_tracker_to_pelvis": {
-    "position_m": [0.0, 0.0, 0.0],
-    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+    "position_m": [
+      0.002,
+      -0.078,
+      0.058
+    ],
+    "quaternion_xyzw": [
+      0.5,
+      -0.5,
+      0.4999999999999999,
+      0.5000000000000001
+    ]
   },
   "object_tracker_to_object": {
-    "position_m": [0.0, 0.0, 0.0],
-    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+    "position_m": [
+      0.0,
+      0.0,
+      0.15
+    ],
+    "quaternion_xyzw": [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ]
   },
   "object_half_extents_m": [0.15, 0.15, 0.15],
   "goal_position_w": [0.0, 1.0, 0.15]

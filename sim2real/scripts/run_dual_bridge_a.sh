@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SIM2REAL_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+BRIDGE_ROOT="$(cd "${SCRIPT_DIR}/../../g1_sim2real" && pwd)"
 source "${SCRIPT_DIR}/dual_network_common.sh"
 load_dual_network_side a
 export G1_NET="${G1_NET_A:-${DUAL_INTERFACE}}"

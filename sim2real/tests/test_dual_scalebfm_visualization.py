@@ -15,10 +15,18 @@ from dual_runtime.visualization import (
     encode_visualization,
 )
 from dual_runtime.visualization_replay import DualScaleBFMReplay
+from dual_runtime.vive_dual_pose import DualViveDeploymentConfig
+from omnicontact.perception.openvr_tracker import ViveSample
+from omnicontact.perception.vive_pose import RigidTransform
+from omnicontact.replay import ReplayClock
 from scripts.view_dual_scalebfm_residual import (
+    _load_default_pose,
+    _set_reference_visibility,
     apply_bridge_joint_state,
+    apply_vive_samples,
     apply_visualization,
     decode_bridge_joint_state,
+    initialize_default_pose,
     load_twin,
 )
 
@@ -123,6 +131,185 @@ def test_dual_twin_loads_and_applies_independent_a_b_state():
     )
 
 
+def test_dual_twin_uses_shared_omnicontact_visual_style():
+    model, data, bindings = load_twin(
+        ROOT / "config/g1/assets/dual_scalebfm_twin.xml"
+    )
+
+    def geom_id(name: str) -> int:
+        result = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        assert result >= 0
+        return int(result)
+
+    np.testing.assert_allclose(
+        model.geom_rgba[bindings.actual_box_geom], [0.8, 0.6, 0.4, 1.0]
+    )
+    np.testing.assert_allclose(
+        model.geom_rgba[bindings.reference_box_geom], [0.9, 0.3, 0.0, 0.7]
+    )
+    assert (
+        model.geom_type[geom_id("tracker_a_marker_geom")]
+        == mujoco.mjtGeom.mjGEOM_MESH
+    )
+    assert (
+        model.geom_type[geom_id("tracker_b_marker_geom")]
+        == mujoco.mjtGeom.mjGEOM_MESH
+    )
+    assert (
+        model.geom_type[geom_id("tracker_object_marker_geom")]
+        == mujoco.mjtGeom.mjGEOM_MESH
+    )
+    assert geom_id("world_frame_axis_x") >= 0
+    assert geom_id("box_frame_axis_z") >= 0
+
+    actual_a_colors = []
+    actual_b_colors = []
+    reference_alphas = []
+    for current_geom in range(model.ngeom):
+        body_name = mujoco.mj_id2name(
+            model,
+            mujoco.mjtObj.mjOBJ_BODY,
+            int(model.geom_bodyid[current_geom]),
+        )
+        if body_name and body_name.startswith("actual_a_"):
+            actual_a_colors.append(model.geom_rgba[current_geom].copy())
+        if body_name and body_name.startswith("actual_b_"):
+            actual_b_colors.append(model.geom_rgba[current_geom].copy())
+        if body_name and body_name.startswith("reference_a_"):
+            reference_alphas.append(float(model.geom_rgba[current_geom, 3]))
+    np.testing.assert_allclose(actual_a_colors, actual_b_colors)
+    assert len(np.unique(np.round(actual_a_colors, 3), axis=0)) > 1
+    np.testing.assert_allclose(reference_alphas, 0.24)
+
+    _set_reference_visibility(model, bindings.reference_alpha, False)
+    np.testing.assert_allclose(
+        [model.geom_rgba[geom_id, 3] for geom_id in bindings.reference_alpha],
+        0.0,
+    )
+    apply_visualization(model, data, bindings, visualization_packet())
+    np.testing.assert_allclose(
+        [
+            model.geom_rgba[geom_id, 3]
+            for geom_id in bindings.reference_alpha
+        ],
+        list(bindings.reference_alpha.values()),
+    )
+
+
+def test_dual_twin_initializes_both_robots_to_omnicontact_default_pose():
+    _, data, bindings = load_twin(
+        ROOT / "config/g1/assets/dual_scalebfm_twin.xml"
+    )
+    default_pose = _load_default_pose(
+        ROOT / "config/g1/omnicontact/OmniContact.yaml"
+    )
+    initialize_default_pose(data, bindings, default_pose)
+    expected = np.tile(default_pose, (2, 1))
+    np.testing.assert_allclose(data.qpos[bindings.actual_joint_qpos], expected)
+    np.testing.assert_allclose(
+        data.qpos[bindings.reference_joint_qpos], expected
+    )
+
+
+def _vive_sample(position):
+    return ViveSample(
+        sec=1,
+        nsec=2,
+        line_x_m=position[0],
+        line_y_m=position[1],
+        line_z_m=position[2],
+        qx=0.0,
+        qy=0.0,
+        qz=0.0,
+        qw=1.0,
+    )
+
+
+def test_direct_vive_owns_actual_poses_and_holds_each_tracker_independently():
+    model, data, bindings = load_twin(
+        ROOT / "config/g1/assets/dual_scalebfm_twin.xml"
+    )
+    config = DualViveDeploymentConfig(
+        robot_a_tracker_serial="TRACKER_A",
+        robot_b_tracker_serial="TRACKER_B",
+        object_tracker_serial="TRACKER_OBJECT",
+        world_from_steamvr=RigidTransform([10, 0, 0], [0, 0, 0, 1]),
+        robot_a_tracker_to_pelvis=RigidTransform([0, 0.1, 0], [0, 0, 0, 1]),
+        robot_b_tracker_to_pelvis=RigidTransform([0, -0.1, 0], [0, 0, 0, 1]),
+        object_tracker_to_object=RigidTransform([0, 0, 0.2], [0, 0, 0, 1]),
+        object_half_extents_m=[0.4, 0.2, 0.1],
+        calibration_confirmed=True,
+    )
+    last_transforms = [None, None, None]
+    samples = {
+        "TRACKER_A": _vive_sample([1, 2, 3]),
+        "TRACKER_B": _vive_sample([4, 5, 6]),
+        "TRACKER_OBJECT": _vive_sample([7, 8, 9]),
+    }
+    assert apply_vive_samples(
+        model, data, bindings, config, samples, last_transforms
+    ) == (True, True, True)
+    np.testing.assert_allclose(
+        data.qpos[bindings.actual_base_qpos[0] : bindings.actual_base_qpos[0] + 3],
+        [11, 2.1, 3],
+    )
+    np.testing.assert_allclose(
+        data.qpos[bindings.actual_base_qpos[1] : bindings.actual_base_qpos[1] + 3],
+        [14, 4.9, 6],
+    )
+    np.testing.assert_allclose(
+        data.qpos[bindings.actual_box_qpos : bindings.actual_box_qpos + 3],
+        [17, 8, 9.2],
+    )
+    np.testing.assert_allclose(
+        data.mocap_pos[bindings.tracker_mocap],
+        [[11, 2, 3], [14, 5, 6], [17, 8, 9]],
+    )
+    np.testing.assert_allclose(
+        model.geom_size[bindings.actual_box_geom, :3], [0.4, 0.2, 0.1]
+    )
+
+    held_b_pose = data.qpos[
+        bindings.actual_base_qpos[1] : bindings.actual_base_qpos[1] + 7
+    ].copy()
+    assert apply_vive_samples(
+        model,
+        data,
+        bindings,
+        config,
+        {
+            "TRACKER_A": _vive_sample([2, 2, 3]),
+            "TRACKER_B": None,
+            "TRACKER_OBJECT": _vive_sample([7, 8, 9]),
+        },
+        last_transforms,
+    ) == (True, False, True)
+    np.testing.assert_allclose(
+        data.qpos[bindings.actual_base_qpos[1] : bindings.actual_base_qpos[1] + 7],
+        held_b_pose,
+    )
+
+    direct_actual = data.qpos[
+        bindings.actual_base_qpos[0] : bindings.actual_base_qpos[0] + 7
+    ].copy()
+    direct_marker = data.mocap_pos[bindings.tracker_mocap[0]].copy()
+    apply_visualization(
+        model,
+        data,
+        bindings,
+        visualization_packet(),
+        apply_actual=False,
+        apply_tracker_markers=False,
+    )
+    np.testing.assert_allclose(
+        data.qpos[bindings.actual_base_qpos[0] : bindings.actual_base_qpos[0] + 7],
+        direct_actual,
+    )
+    np.testing.assert_allclose(
+        data.mocap_pos[bindings.tracker_mocap[0]], direct_marker
+    )
+
+
 def test_bridge_state_decoder_is_fail_closed():
     q = np.arange(29, dtype=np.float32)
     np.testing.assert_array_equal(decode_bridge_joint_state({"q": q}), q)
@@ -206,6 +393,17 @@ def test_rollout_replay_reconstructs_reference_and_actual_state(tmp_path):
     replay = DualScaleBFMReplay(tmp_path / "rollout.npz")
     assert replay.frame_count == 3
     np.testing.assert_allclose(replay.elapsed_s, [0.0, 0.02, 0.04])
+    assert replay.frame_index_at(-1.0) == 0
+    assert replay.frame_index_at(0.019) == 0
+    assert replay.frame_index_at(0.02) == 1
+    assert replay.frame_index_at(99.0) == 2
+    clock = ReplayClock(
+        replay, speed=1.0, start_frame=0, paused=True, loop=False
+    )
+    assert clock.step(1) == 1
+    assert clock.shift_speed(-1) == 0.5
+    assert clock.restart(paused=False) == 0
+    assert not clock.paused
     packet = replay.visualization_packet(2)
     assert packet["policy"]["frame"] == 2
     np.testing.assert_allclose(packet["policy"]["target_joint_pos"], 0.25)

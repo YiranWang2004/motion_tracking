@@ -76,6 +76,17 @@ class DualScaleBFMReplay:
     def duration_s(self) -> float:
         return float(self.elapsed_s[-1]) if self.frame_count > 1 else 0.0
 
+    def frame_index_at(self, elapsed_s: float) -> int:
+        """Return the rollout frame active at a replay-relative timestamp."""
+
+        return int(
+            np.clip(
+                np.searchsorted(self.elapsed_s, float(elapsed_s), side="right") - 1,
+                0,
+                self.frame_count - 1,
+            )
+        )
+
     def visualization_packet(self, index: int) -> dict[str, Any]:
         index = int(np.clip(index, 0, self.frame_count - 1))
         recorded_frame = int(self.arrays["frame"][index])

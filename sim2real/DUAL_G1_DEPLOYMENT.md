@@ -1,8 +1,11 @@
-# 双 G1 同时部署与逐环节验收手册（vive 分支）
+# 双 G1 底层路由与逐环节验收手册（vive 分支）
 
 本文用于一台推理主机通过两个独立网口控制两台 Unitree G1。两台机器人均保留默认地址 `192.168.123.164`，因此每个物理网口和对应 bridge 必须位于独立 Linux network namespace。
 
-本文先验收当前已经实现的“双机独立 PD 控制最小闭环”，再说明正式 Dual ScaleBFM/OmniContact policy 上机前必须增加的验收环节。不得跳过前序阶段直接运行双机 learned policy。
+本文验收“双机独立 PD 控制最小闭环”，它是正式 Dual ScaleBFM Residual 上机前的底层
+路由准入测试。正式策略入口已经实现，配置、离线验证、sim2sim 和实机分阶段启动见
+[DUAL_SCALEBFM_DEPLOY_ZH.md](DUAL_SCALEBFM_DEPLOY_ZH.md)。当前 checkpoint 是否可上机
+以该文档中的动力学回归结论为准；不得因为本手册的路由测试通过就跳过策略验收。
 
 ## 1. 当前能力边界
 
@@ -30,14 +33,9 @@ G1 B: left_elbow_joint = initial_q[21] - 0.03 rad
 
 目标不会随每一帧测量值累积。单周期变化限制为 `0.005 rad`，PD 增益来自 `config/g1/controller.yaml`。
 
-当前尚未完成：
-
-- Dual ScaleBFM/OmniContact 联合 observation 和 58 维 action adapter；
-- 三 Tracker（G1 A、G1 B、物体）的实际 `DualPoseProvider`；
-- 双机 default-pose、standing、task 状态机；
-- 双机实机 DDS 隔离与机械动作验证。
-
-因此第 2～14 节是当前可执行的独立控制验收；第 15 节是正式双机 policy 的准入条件。
+本手册只验证两台同 IP G1 的 network namespace、bridge、UDP 路由、A/B 身份和故障
+隔离，不验证正式策略的 observation、三 Tracker、ScaleBFM/residual action 或动力学表现。
+第 2～14 节是底层独立控制验收；第 15 节列出与正式策略教程衔接时必须保留的准入条件。
 
 ## 2. 安全规则
 
@@ -57,7 +55,7 @@ G1 B: left_elbow_joint = initial_q[21] - 0.03 rad
 5. 周围没有人员、硬物、线缆缠绕或可能被手臂撞击的物体。
 6. 任一输出、姿态、网口或机器人身份不确定时，立即停止。
 
-## 3. 固定本次测试参数
+## 3. 固定网络配置（持久配置源）
 
 | 项目 | G1 A | G1 B |
 | --- | --- | --- |
@@ -71,10 +69,22 @@ G1 B: left_elbow_joint = initial_q[21] - 0.03 rad
 | 命令 UDP 端口 | `55002` | `55102` |
 | 状态镜像端口 | `55003` | `55103` |
 
-这些是 [config/g1/dual_network.yaml](config/g1/dual_network.yaml) 中的默认值。实机网口名称
-不同只修改该文件的 `robot_a.interface`、`robot_b.interface` 和对应 `expected_mac`，不要再逐条
-修改命令或启动脚本。bridge 启动前会同时核对接口名和 MAC，防止 A/B 网口被交换。
-读取器还会检查 veth 地址与两个 bridge YAML 的 UDP 地址一致，避免出现两套配置源。
+上表是 [config/g1/dual_network.yaml](config/g1/dual_network.yaml) 当前默认配置的解析结果，
+不是需要在每条命令中重新输入的参数。首次接线或更换网卡时，只在该文件中修改以下四项：
+
+```yaml
+robot_a:
+  interface: "<G1 A 的物理网口>"
+  expected_mac: "<该网口的 MAC>"
+robot_b:
+  interface: "<G1 B 的物理网口>"
+  expected_mac: "<该网口的 MAC>"
+```
+
+后续网络创建、检查、诊断和 bridge 启动都自动读取该文件，不再在命令行传网口或
+namespace，也不要逐条修改启动脚本。bridge 启动前会同时核对接口名和 MAC，防止 A/B
+网口被交换；配置读取器还会检查 veth 地址与两个 bridge YAML 的 UDP 地址一致，避免出现
+两套配置源。文中拓扑图和表格里的 `enp10s0`/`enp11s0` 只是当前默认配置的解析示例。
 
 ## 4. 阶段 0：代码与软件环境
 
@@ -85,22 +95,24 @@ git log -1 --oneline
 git status --short
 ```
 
-放行条件：分支是 `vive`；目标基线为已核对的 `2e83390` 或其明确后续提交；工作区修改来源清楚。
+放行条件：分支是 `vive`；本机提交与计划验收的远端提交一致；工作区修改来源清楚，并把
+`git log -1` 的结果写入验收记录。不要再用文档中的历史 commit 号代替现场确认。
 
 安装依赖并测试：
 
 ```bash
 cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
 uv sync --extra vive
-PYTHONPATH=src uv run pytest -q tests/test_dual_runtime.py
-PYTHONPATH=src:. uv run pytest -q tests/test_omnicontact_vive.py
+PYTHONPATH=src:. uv run --extra vive --with pytest pytest -q \
+  tests/test_dual_runtime.py \
+  tests/test_omnicontact_vive.py \
+  tests/test_dual_network_config.py
 ```
 
 预期至少为：
 
 ```text
-test_dual_runtime.py: 4 passed
-test_omnicontact_vive.py: 5 passed
+13 passed
 ```
 
 构建 bridge：
@@ -115,23 +127,27 @@ test -x build/g1_udp_bridge
 
 ## 5. 阶段 1：确认物理网口身份
 
-先不连接机器人：
+首次接线或更换网卡时先不连接机器人，用 `ip -br link` 和逐根插拔网线确定 A/B 对应的
+接口。`ethtool -i <接口>` 可辅助确认驱动；`ip -o link show dev <接口>` 可读取 MAC。
+确认后把两组接口名和 MAC 一次性写入 `config/g1/dual_network.yaml`，不要改本文后续命令。
+
+写入后运行配置预览：
 
 ```bash
-ip -br link
-ip -br addr
-ethtool -i enp10s0
-ethtool -i enp11s0
+cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
+bash scripts/setup_dual_network.sh
 ```
 
-分别插拔 A、B 网线，确认：
+预览会打印配置解析出的 A/B 接口、MAC、namespace、地址和 bridge 配置。再次分别插拔 A、B
+网线，确认预览中的接口只随对应网线变化。例如，使用仓库默认配置时应为：
 
 ```text
 只插拔 G1 A 网线 -> 只有 enp10s0 的 LOWER_UP/NO-CARRIER 变化
 只插拔 G1 B 网线 -> 只有 enp11s0 的 LOWER_UP/NO-CARRIER 变化
 ```
 
-物理接口、机器人标签和线缆必须一一对应。
+物理接口、MAC、机器人标签和线缆必须一一对应。以后只有接线或硬件发生变化才重新执行
+本阶段；日常启动直接使用配置文件。
 
 ## 6. 阶段 2：创建同 IP 隔离网络
 
@@ -154,14 +170,11 @@ sudo bash scripts/setup_dual_network.sh --check
 `--apply` 可重复执行，不会删除或替换来源不明的半残 veth；遇到不完整拓扑会停止并要求人工检查。
 namespace 在重启后消失，因此每次主机重启后重新执行一次 `--apply`。
 
-检查：
+用配置驱动的检查脚本验收，不要手工重输接口或 namespace：
 
 ```bash
-ip -br addr show veth-g1a veth-g1b
-sudo ip netns exec g1a ip -br addr
-sudo ip netns exec g1b ip -br addr
-sudo ip netns exec g1a ip route
-sudo ip netns exec g1b ip route
+sudo bash scripts/setup_dual_network.sh --check
+bash scripts/diagnostics_dual_network.sh
 ```
 
 放行条件：
@@ -177,20 +190,18 @@ g1a/g1b 各自有独立的 192.168.123.0/24 直连路由
 
 ## 7. 阶段 3：IP、ARP 与断线隔离
 
-打开两台机器人网络，暂不启动 bridge：
+打开两台机器人网络，暂不启动 bridge。诊断脚本会从 `dual_network.yaml` 读取两侧的接口、
+namespace 和机器人 IP，分别执行 ping 并显示 ARP/neighbour 表：
 
 ```bash
-sudo ip netns exec g1a ping -c 5 -I enp10s0 192.168.123.164
-sudo ip netns exec g1b ping -c 5 -I enp11s0 192.168.123.164
-sudo ip netns exec g1a ip neigh show dev enp10s0
-sudo ip netns exec g1b ip neigh show dev enp11s0
+bash scripts/diagnostics_dual_network.sh
 ```
 
 两个 namespace 应分别得到对应机器人的 ARP/MAC。
 
 断线测试：
 
-1. 分别持续运行 A、B ping。
+1. 从诊断脚本末尾复制两条“持续 ping”命令，分别运行 A、B ping；这些命令已按配置生成。
 2. 只拔 A 网线；A ping 中断，B 必须继续。
 3. 恢复 A 后只拔 B；B ping 中断，A 必须继续。
 
@@ -241,8 +252,8 @@ bash scripts/run_dual_bridge_a.sh
 bash scripts/run_dual_bridge_b.sh
 ```
 
-这三个脚本都自动读取 `dual_network.yaml`，日常命令不再传网口或 namespace。旧的
-`G1_NET_A/B`、`G1_NETNS_A/B` 只保留用于一次性的诊断覆盖。
+这三个脚本都自动读取 `dual_network.yaml`，日常命令不传网口或 namespace。需要更换网口
+时修改配置文件并重新执行第 5～7 节，不使用临时环境变量绕过持久配置。
 
 日志必须分别确认：
 
@@ -258,19 +269,20 @@ bash scripts/run_dual_bridge_b.sh
 ```bash
 cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
 bash scripts/diagnostics_dual_network.sh
-ss -lunp | rg ':(55001|55101)\b'
-sudo ip netns exec g1a ss -lunp | rg ':55002\b'
-sudo ip netns exec g1b ss -lunp | rg ':55102\b'
 ```
 
-抓 DDS 流量必须进入 namespace：
+脚本会同时显示主 namespace 和两侧 network namespace 的 UDP listener，不需要手工输入
+namespace 或端口。
+
+抓 DDS 流量必须进入 namespace。`diagnostics_dual_network.sh` 末尾会按当前配置打印两条
+可直接复制的 `tcpdump` 命令；不要照抄固定接口名。仓库默认配置生成的命令形如：
 
 ```bash
 sudo ip netns exec g1a tcpdump -ni enp10s0 udp
 sudo ip netns exec g1b tcpdump -ni enp11s0 udp
 ```
 
-物理接口已不在主 namespace，不能直接运行 `tcpdump -i enp10s0`。
+物理接口已不在主 namespace，不能在主 namespace 直接抓该接口。
 
 ## 10. 阶段 6：双机未使能命令
 
@@ -352,12 +364,10 @@ G1 A 左肘：initial + 0.03 rad
 G1 B 左肘：initial - 0.03 rad
 ```
 
-两侧应在同一轮测试中方向相反且互不串线。保存 A/B bridge 日志、coordinator 输出、带 A/B 标签的视频和两侧抓包：
-
-```bash
-sudo ip netns exec g1a tcpdump -ni enp10s0 udp -w /tmp/dual_g1_a.pcap
-sudo ip netns exec g1b tcpdump -ni enp11s0 udp -w /tmp/dual_g1_b.pcap
-```
+两侧应在同一轮测试中方向相反且互不串线。保存 A/B bridge 日志、coordinator 输出、带 A/B
+标签的视频和两侧抓包。抓包时使用 `diagnostics_dual_network.sh` 按配置打印的两条
+`tcpdump` 命令，并分别追加 `-w /tmp/dual_g1_a.pcap` 与
+`-w /tmp/dual_g1_b.pcap`。
 
 出现持续漂移、振荡、身份反转或非左肘动作时立即停止。
 
@@ -394,11 +404,18 @@ sudo ip netns exec g1b tcpdump -ni enp11s0 udp -w /tmp/dual_g1_b.pcap
 
 ## 15. 正式 Dual policy 上机准入
 
-当前最小入口不能直接运行 Dual ScaleBFM。正式 adapter 完成后还必须通过以下检查。
+最小路由入口 `run_dual_deploy.sh` 不能加载 Dual ScaleBFM。正式策略必须改用
+`run_dual_scalebfm_residual.sh`，并按
+[DUAL_SCALEBFM_DEPLOY_ZH.md](DUAL_SCALEBFM_DEPLOY_ZH.md) 完成产物、Tracker、离线推理和
+sim2sim 验收。以下准入条件仍然全部适用。
 
 ### 15.1 模型契约
 
-`policy_metadata.json` 必须填写并强校验：模型文件/哈希、observation shape/顺序、58 维 action 布局、A/B 29 DoF joint order、absolute/residual 类型、default pose、action scale、kp/kd、控制频率和 history 长度。
+当前正式入口以 `dual_scalebfm_residual.yaml` 和
+`dual_policy_artifacts/manifest.json` 为运行时配置源。准备产物时必须校验所有模型文件的
+SHA256、两侧 Actor/normalizer 一致、每台机器人 201 维 observation 和 29 维 action，以及
+A/B 29 DoF joint order、ScaleBFM absolute target、residual scale、kp/kd 和 50 Hz 控制频率。
+`policy_metadata.json` 是契约摘要，不应代替 manifest、离线验证或 sim2sim 验收。
 
 必须有测试分别给 A、B action 注入唯一值，证明不会映射到另一台机器人。
 
@@ -437,7 +454,7 @@ object_tracker_serial
 
 1. 检查 A/B 标签、支撑、急停和区域。
 2. 执行 `sudo bash scripts/setup_dual_network.sh --apply` 创建/检查两个 namespace 和 veth。
-3. 分别 ping 两台 `192.168.123.164`。
+3. 执行 `bash scripts/diagnostics_dual_network.sh`，确认两侧 ping、ARP 和 A/B 映射。
 4. 执行 `bash scripts/run_dual_bridges.sh`，核对 A/B 接口、端口和 lowstate。
 5. 确认任一 bridge 退出会联动停止另一侧。
 6. 检查两路错误计数。

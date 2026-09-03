@@ -5,8 +5,8 @@ version: 1
 robot_ip: "192.168.123.164"
 
 robot_a:
-  interface: "enp10s0"
-  expected_mac: "bc:fc:e7:b8:96:49"
+  interface: "enx6c1ff770ecdd"
+  expected_mac: "6c:1f:f7:70:ec:dd"
   namespace: "g1a"
   robot_address: "192.168.123.201/24"
   bridge_config: "../../../g1_sim2real/config/bridge_omnicontact_a.yaml"
@@ -17,8 +17,8 @@ robot_a:
     namespace_address: "10.201.1.2/24"
 
 robot_b:
-  interface: "enp11s0"
-  expected_mac: "60:cf:84:8a:8f:95"
+  interface: "enx6c1ff7eb0f25"
+  expected_mac: "6c:1f:f7:eb:0f:25"
   namespace: "g1b"
   robot_address: "192.168.123.201/24"
   bridge_config: "../../../g1_sim2real/config/bridge_omnicontact_b.yaml"

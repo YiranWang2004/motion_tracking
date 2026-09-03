@@ -21,7 +21,7 @@ DEFAULT_RESIDUAL_CHECKPOINT = (
     / "results/ablation_collision_omnicontact_hand/omnicontact-hand-1.5kg"
     / "checkpoints/best_agent.pt"
 )
-DEFAULT_REFERENCE_BUNDLE = DEFAULT_SOURCE / "results/cfgen_batch_128/motion_000010.npz"
+DEFAULT_REFERENCE_BUNDLE = DEFAULT_SOURCE / "results/cfgen_batch_128/motion_000000.npz"
 
 
 def sha256(path: Path) -> str:

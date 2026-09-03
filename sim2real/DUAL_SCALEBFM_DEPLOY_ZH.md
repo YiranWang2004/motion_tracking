@@ -46,6 +46,16 @@ config/g1/omnicontact_vive_dual.json
 uv run --extra vive python scripts/list_vive_trackers.py --seconds 10
 ```
 
+需要确认三台设备分别对应哪个序列号时，实时显示所有 Tracker 的原始 XYZ，然后每次只移动
+一台，观察对应行：
+
+```bash
+uv run --extra vive python scripts/identify_vive_trackers.py
+```
+
+确认后把三个固定的 `LHR-...` 序列号分别写入双机配置；不要使用可能在重连后变化的
+OpenVR index。按 `Ctrl-C` 结束实时显示。
+
 `calibrate_vive_world.py` 用 O/+X/+Y 三点建立公共世界坐标；
 `calibrate_vive_box_world.py` 可以用箱子 Tracker 建立/核查箱子坐标。两台机器人
 Tracker 到 pelvis 的外参必须按实际刚性安装位置测量，不能保留零值占位。
@@ -64,8 +74,17 @@ uv run --extra dual-policy python scripts/validate_dual_scalebfm_policy.py --ste
 
 ## 4. 启动双网络和 bridge
 
-先在 `config/g1/dual_network.yaml` 中写入固定的 A/B 物理网口和对应 MAC。该文件同时保存 namespace、
-物理口 IP、veth 和 bridge 配置路径。之后不需要在命令行重复输入网口名称。
+首次接线时，在 `config/g1/dual_network.yaml` 中写入固定的
+`robot_a.interface`、`robot_a.expected_mac`、`robot_b.interface` 和
+`robot_b.expected_mac`。该文件是双机日常启动的持久配置源，同时保存 namespace、物理口 IP、
+veth 和 bridge 配置路径。后续所有命令都自动读取它，不要在命令行重复输入网口或
+namespace；更换网卡或接线时也只修改该文件。
+
+修改后先做只读预览，确认 A/B、接口名和 MAC 与现场接线一致：
+
+```bash
+bash scripts/setup_dual_network.sh
+```
 
 主机每次重启后执行：
 
@@ -96,25 +115,52 @@ bash scripts/run_dual_bridges.sh
 bash scripts/run_dual_scalebfm_viewer.sh --check-model
 ```
 
-bridge A/B 启动后，在独立终端启动实时 viewer：
+启动 SteamVR 并确认三台 Tracker 在线后，即可在独立终端启动实时 viewer；不要求 bridge
+或 policy 已经启动：
 
 ```bash
 bash scripts/run_dual_scalebfm_viewer.sh
 ```
 
-viewer 默认接收三路只读 UDP：
+viewer 默认直接读取 `config/g1/omnicontact_vive_dual.json` 和 OpenVR。三台 Tracker 分别
+决定 A pelvis、B pelvis 和箱子的实际空间姿态；两台机器人关节先使用与单机 viewer 相同的
+`config/g1/omnicontact/OmniContact.yaml:default_angles_lab`。因此只有 Tracker 在线、两个
+bridge 和 policy 都未启动时，也能显示两台 default-pose G1 和实测箱子。
 
-- `55003`：G1 A bridge state mirror，只读取 A 的 29 维实测关节角。
-- `55103`：G1 B bridge state mirror，只读取 B 的 29 维实测关节角。
-- `55204`：policy visualization，包含三 Tracker 标定后的 A/B pelvis 与箱子姿态、CFGen
-  reference、ScaleBFM target、residual 和最终 PD target。
+此外，viewer 并行接收三路只读 UDP：
 
-实心蓝色和琥珀色模型分别是 A/B 实机状态；半透明绿色和洋红色模型是 A/B reference；
-实心棕色箱子是 Tracker 实测状态，半透明绿色箱子是 CFGen reference。三个带 XYZ 轴的
-球形标记表示 Tracker 标定后实际用于 policy 的 A pelvis、B pelvis 和箱子坐标，不是原始
-SteamVR 坐标。
+- `55003`：G1 A bridge state mirror；收到后只用 A 的 29 维实测关节角覆盖 default pose。
+- `55103`：G1 B bridge state mirror；收到后只用 B 的 29 维实测关节角覆盖 default pose。
+- `55204`：policy visualization，提供 CFGen reference、ScaleBFM target、residual 和最终
+  PD target；在 OpenVR 直读模式下不会反向覆盖 viewer 自己读取的实测 pelvis/箱子姿态。
+
+两台实测机器人都保留 G1 原生材质，半透明黄色和橙色模型分别是 A/B ghost；实心棕色箱子
+是 Tracker 标定后的实测状态，半透明橙色箱子是 CFGen reference。蓝色、紫色和橙色的三个
+金字塔及其 XYZ 轴分别表示 A、B 和箱子原始 Tracker 坐标；机器人 pelvis 和实测箱子已经应用
+各自的 tracker-to-body 外参。某台 Tracker 短暂丢帧时保留它最后一次有效姿态，另外两台继续
+更新。世界原点和实测箱子也显示红 X、绿 Y、蓝 Z 坐标轴，场景、箱子和坐标轴配色与单机
+OmniContact 搬箱子 viewer 一致。
+
+只测试 Tracker、明确不接收 bridge 关节镜像时可以执行：
+
+```bash
+bash scripts/run_dual_scalebfm_viewer.sh --state-port-a 0 --state-port-b 0
+```
+
+如果 viewer 在没有 SteamVR 的远端机器运行，可使用 `--no-vive` 恢复为完全依赖 policy
+visualization 中实测姿态的模式：
+
+```bash
+bash scripts/run_dual_scalebfm_viewer.sh --no-vive
+```
+
+此时三个金字塔只能显示 visualization/replay 中的标定后策略姿态，而不是原始 Tracker 本体。
 
 按 `G` 在“CFGen reference ghost”和“最终发送给 bridge 的限幅 PD target ghost”之间切换。
+离线回放时，空格或 `P` 暂停/继续，`N/B` 前后单帧，`A/D` 降低/提高播放速度，`R` 从头播放。
+需要只观察箱子、坐标系和 ghost 时可增加 `--no-robot` 隐藏两台实测 G1 网格。实时 visual
+数据超过 `--stream-timeout` 后，reference/target ghost 会像单机 viewer 一样自动隐藏，收到
+新包后自动恢复，避免把过期参考姿态误认为当前姿态。
 viewer 不创建命令 socket、不向 bridge 或机器人发送任何数据，关闭或崩溃不会改变控制环。
 同一组 mirror 端口只启动一个 viewer，避免 `SO_REUSEADDR` 下多个进程争用 UDP 数据。
 
@@ -182,10 +228,11 @@ bash scripts/run_dual_scalebfm_viewer.sh \
 回放会使用同目录 `metadata.json` 记录的 reference 路径，按首帧 robot A 姿态重新执行与实机
 一致的 `xyyaw` 对齐。reference 文件已移动时，增加
 `--reference-bundle /绝对路径/reference_bundle.npz`。按空格或 `P` 暂停，`N/B` 前后单帧，
-`R` 从头播放，`G` 切换 reference/最终 PD target ghost。
+`A/D` 调整播放速度，`R` 从头播放，`G` 切换 reference/最终 PD target ghost。
 
-实时终端每秒打印 A、B、visual 三路数据年龄；超过默认 `500 ms` 会显示 `!`。这是 viewer
-告警，不代替 policy 中更严格的 `200 ms` bridge state 和 `100 ms` Tracker fail-closed 检查。
+实时终端每秒打印 A、B、visual、viveA、viveB 和 viveObj 数据年龄；超过默认 `500 ms` 会
+显示 `!`。这是 viewer 告警，不代替 policy 中更严格的 `200 ms` bridge state 和 `100 ms`
+Tracker fail-closed 检查。
 
 ## 8. 与实机控制链严格对齐的 sim2sim
 

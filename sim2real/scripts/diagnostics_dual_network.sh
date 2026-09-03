@@ -35,11 +35,15 @@ for entry in "${NETNS_A}:${IFACE_A}:${ROBOT_IP_A}" "${NETNS_B}:${IFACE_B}:${ROBO
     echo "[${namespace}]"
     sudo ip -n "${namespace}" -br addr
     sudo ip netns exec "${namespace}" ping -c 1 -W 1 -I "${interface}" "${robot_ip}" || true
+    sudo ip -n "${namespace}" neigh show dev "${interface}" || true
     sudo ip netns exec "${namespace}" ss -lunp | rg ':(55001|55002|55003|55101|55102|55103)\b' || true
   else
     echo "[${namespace}] missing"
   fi
 done
+echo "== optional continuous reachability commands =="
+echo "  sudo ip netns exec ${NETNS_A} ping -I ${IFACE_A} ${ROBOT_IP_A}"
+echo "  sudo ip netns exec ${NETNS_B} ping -I ${IFACE_B} ${ROBOT_IP_B}"
 echo "== optional DDS/RTPS capture commands =="
 echo "  sudo ip netns exec ${NETNS_A} tcpdump -ni ${IFACE_A} udp"
 echo "  sudo ip netns exec ${NETNS_B} tcpdump -ni ${IFACE_B} udp"

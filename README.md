@@ -339,4 +339,8 @@ See [`sim2real/DUAL_G1_DEPLOYMENT.md`](sim2real/DUAL_G1_DEPLOYMENT.md) for the
 same-IP namespace setup, bridge A/B launch commands, and the required no-act
 then low-amplitude PD acceptance sequence.  The dual entry point is a routing
 test; it is not a replacement for the single-G1 OmniContact policy or a final
-Dual ScaleBFM checkpoint.
+Dual ScaleBFM checkpoint.  Both physical interfaces and their expected MACs are
+stored once in `sim2real/config/g1/dual_network.yaml`; the dual setup,
+diagnostics, and bridge launch scripts read that file automatically.  See
+[`sim2real/DUAL_SCALEBFM_DEPLOY_ZH.md`](sim2real/DUAL_SCALEBFM_DEPLOY_ZH.md) for
+the implemented Dual ScaleBFM Residual validation and deployment flow.

@@ -107,6 +107,15 @@ uv run --extra vive python scripts/view_raw_tracker_poses.py \
 uv run --extra vive python scripts/view_raw_tracker_poses.py
 ```
 
+不打开可视化窗口，实时列出当前所有 Tracker 的原始 XYZ 和序列号：
+
+```bash
+uv run --extra vive python scripts/identify_vive_trackers.py
+```
+
+每次只移动一台 Tracker，观察哪一行的 XYZ 和 `MOVED` 变化，即可确认该设备的固定
+`LHR-...` 序列号。按 `Ctrl-C` 结束。
+
 ## 4. 标定流程
 
 推荐顺序：Tracker 检查 → 世界系标定 → robot Tracker/pelvis 外参 → 箱子外参和尺寸 → goal → 综合预览 → 最后设置 `calibration_confirmed: true`。
