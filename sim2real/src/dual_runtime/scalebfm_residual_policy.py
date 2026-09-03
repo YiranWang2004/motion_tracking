@@ -97,6 +97,14 @@ class DualScaleBFMResidualPolicy:
         return self.scalebfm.default_q
 
     @property
+    def start_joint_targets(self) -> np.ndarray:
+        """Training-reset joint positions for A/B at the configured start frame."""
+        reference_a, reference_b = self.reference.frame(self.start_frame)
+        return np.stack((reference_a.joint_pos, reference_b.joint_pos)).astype(
+            np.float32, copy=True
+        )
+
+    @property
     def kp(self) -> np.ndarray:
         return self.scalebfm.kp
 

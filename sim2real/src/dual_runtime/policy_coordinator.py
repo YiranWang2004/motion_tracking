@@ -138,7 +138,9 @@ class DualPolicyCoordinator:
             if self.state == DeploymentState.DEFAULT_POSE:
                 for index, robot in enumerate(self.robots):
                     robot.send_target(
-                        self.policy.default_q, states[index], enable=self.enable[index]
+                        self.policy.start_joint_targets[index],
+                        states[index],
+                        enable=self.enable[index],
                     )
                 self.default_ticks_elapsed += 1
                 if self.default_ticks_elapsed >= self.default_pose_ticks:

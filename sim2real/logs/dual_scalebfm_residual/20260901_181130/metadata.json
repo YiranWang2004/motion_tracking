@@ -1,0 +1,13 @@
+{
+  "config": "/home/yiranwang/TeleHuman/motion_tracking/sim2real/config/g1/dual_scalebfm_residual.yaml",
+  "reference": "/home/yiranwang/TeleHuman/motion_tracking/sim2real/config/g1/dual_policy_artifacts/reference_bundle.npz",
+  "reference_alignment": "xyyaw",
+  "start_frame": 1,
+  "pose_source": "sim",
+  "vive_config": null,
+  "device": "cpu",
+  "act_robot": "both",
+  "control_frequency_hz": 50.0,
+  "ticks": 599,
+  "saved_at_unix_s": 1788257502.3040123
+}

@@ -11,18 +11,18 @@ XML，并生成 SHA256 manifest。每次更换 checkpoint 或 reference 都必�
 
 ```bash
 cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
-uv run --extra dual-policy python scripts/prepare_dual_scalebfm_artifacts.py \
-  --reference-bundle /home/yiranwang/TeleHuman/Dual_G1_MJ/results/cfgen_box_3m_kimodo.npz
+uv run --extra dual-policy python scripts/prepare_dual_scalebfm_artifacts.py
 ```
 
 当前默认 checkpoint 是：
 
 ```text
-Dual_G1_MJ/dual_g1_scalebfm_residual_object/
-  26-08-20_01-42-05-292432_MAPPO/checkpoints/best_agent.pt
+Dual_G1_MJ/results/ablation_collision_omnicontact_hand/
+  omnicontact-hand-1.5kg/checkpoints/best_agent.pt
 ```
 
-reference 必须是带 `training_*` 字段的双机 bundle，并且必须与要执行的箱子尺寸和
+默认 reference 是训练集第一条 `motion_000000.npz`。reference 必须是带 `training_*`
+字段的双机 bundle，并且必须与要执行的箱子尺寸和
 初始 A/B/箱子几何一致。入口会在发出电机指令前检查这些条件。
 
 ## 2. 配置三台 Tracker
@@ -157,7 +157,9 @@ bash scripts/run_dual_scalebfm_residual.sh \
   --act-robot both --confirm-actuation ENABLE_MOTORS
 ```
 
-前 2 秒是 ScaleBFM default pose 过渡，之后才从配置的 `start_frame` 执行 reference。
+前 2 秒按 A/B 各自的 joint reference 平滑进入 `start_frame`（与训练 reset 一致），
+之后才从该帧执行 ScaleBFM + residual policy。不能用 ScaleBFM 的通用 `default_q`
+代替这个初始关节姿态，否则策略启动时已经偏离训练状态。
 任一 bridge 状态超时、双机 state skew 超限、任一 Tracker 丢失、几何预检失败、模型出现
 非有限值或连续三帧推理超时，都会对两侧发送禁用 hold 并退出。
 
@@ -227,3 +229,20 @@ bash scripts/run_dual_scalebfm_residual.sh \
 `dual_sim_pose`。MuJoCo 必须收到 A/B 对应该时间戳的两条命令后，才执行
 4 个 200 Hz 物理步。`enable=0` 忽略位置目标并仅施加阻尼，`enable=1`
 才应用收到的 `q_des/qd_des/kp/kd`，随后按实机策略元数据裁剪力矩。
+与 OmniContact sim2sim 一样，仿真已经直接初始化到 `start_frame`，因此只在第一个
+20 ms 命令握手期间固定两个 floating root 和箱体；下一帧立即执行正式 ScaleBFM
+target。PD 力矩不是每 20 ms 保持一次旧值，而是在每个 200 Hz 物理子步用最新
+`q/dq` 重新计算。仿真使用训练 `current/g1.xml` 的完整碰撞几何和机身坐标系 IMU gyro。
+
+验收时不能只看两个进程是否连通。终端每秒给出 reference frame、A/B pelvis 高度、
+箱体高度、箱体参考误差、最大关节误差/速度/力矩。箱体 Z 误差超过 `0.10 m` 或 XYZ
+误差超过 `0.30 m` 时，脚本按训练环境相同阈值立即以非零状态退出，不再让失败轨迹
+继续演化成倒地或飞散。
+
+当前 `best_agent.pt` 不是一条通过 12 秒动力学回归的策略。使用训练仓库原生
+`play_scalebfm_residual_object.py`、同一 reference、`start_frame=1` 和固定 `0.5 kg`
+箱体复测，也会在约第 102 个 policy step 因 `object.position_z` 终止并 reset。修复后的
+部署 sim2sim 能完成下蹲、接触并抬起箱子，但重复运行会在约 frame 69 到 161 触发同一
+物体高度失败条件。因此当前工具已经能正确暴露策略失败，不能把它作为该 checkpoint
+已通过动力学或可以直接实机执行的证据；应先更换/重新训练能在原生播放器中完整跑完
+reference 的 checkpoint，再用同一命令要求 sim2sim 零 termination 跑完全程。

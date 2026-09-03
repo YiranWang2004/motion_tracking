@@ -57,6 +57,7 @@ class RobotBinding:
     joint_qpos: np.ndarray
     joint_dof: np.ndarray
     actuators: np.ndarray
+    gyro_sensor: tuple[int, int] | None
     linacc_sensor: tuple[int, int] | None
 
 
@@ -78,6 +79,7 @@ class DualScaleBFMSim2Sim:
         config_path: str | Path,
         *,
         headless: bool = False,
+        reference_bundle: str | Path | None = None,
         transports: tuple[Any, Any] | None = None,
     ) -> None:
         self.config_path = Path(config_path).expanduser().resolve()
@@ -98,13 +100,36 @@ class DualScaleBFMSim2Sim:
         self.startup_timeout_s = float(sim.get("startup_timeout_s", 60.0))
         self.command_retry_s = float(sim.get("state_retry_s", 0.05))
         self.disabled_damping_kd = float(sim.get("disabled_damping_kd", 8.0))
+        self.lock_roots_during_default_pose = bool(
+            sim.get("lock_roots_during_default_pose", True)
+        )
+        self.default_pose_steps = round(
+            float(
+                sim.get(
+                    "default_pose_duration_s",
+                    self.raw.get("default_pose_duration_s", 2.0),
+                )
+            )
+            * self.policy_hz
+        )
+        termination = sim.get("termination", {})
+        self.object_position_z_error_m = float(
+            termination.get("object_position_z_error_m", 0.10)
+        )
+        self.object_position_xyz_error_m = float(
+            termination.get("object_position_xyz_error_m", 0.30)
+        )
         if min(
             self.lockstep_timeout_s,
             self.startup_timeout_s,
             self.command_retry_s,
             self.disabled_damping_kd,
+            self.object_position_z_error_m,
+            self.object_position_xyz_error_m,
         ) <= 0.0:
-            raise ValueError("simulation timeouts and damping must be positive")
+            raise ValueError(
+                "simulation timeouts, damping, and termination thresholds must be positive"
+            )
 
         xml_path = _resolve(self.config_path.parent, sim["xml_path"])
         self.model = mujoco.MjModel.from_xml_path(str(xml_path))
@@ -134,12 +159,24 @@ class DualScaleBFMSim2Sim:
         if np.any(self.torque_limits <= 0.0):
             raise ValueError("simulation torque limits must be positive")
 
-        reference_path = _resolve(
-            self.config_path.parent,
-            Path(self.raw["artifacts"]["directory"])
-            / self.raw["artifacts"]["reference_bundle"],
+        reference_path = (
+            Path(reference_bundle).expanduser().resolve()
+            if reference_bundle is not None
+            else _resolve(
+                self.config_path.parent,
+                Path(self.raw["artifacts"]["directory"])
+                / self.raw["artifacts"]["reference_bundle"],
+            )
         )
-        self._initialize_from_reference(reference_path, int(self.raw.get("start_frame", 1)))
+        self.start_frame = int(self.raw.get("start_frame", 1))
+        self._initialize_from_reference(reference_path, self.start_frame)
+        self._initial_root_qpos = tuple(
+            self.data.qpos[binding.root_qpos : binding.root_qpos + 7].copy()
+            for binding in self.bindings
+        )
+        self._initial_box_qpos = self.data.qpos[
+            self.box_qpos : self.box_qpos + 7
+        ].copy()
 
         robot_cfg = sim.get("robots")
         if not isinstance(robot_cfg, dict):
@@ -179,31 +216,37 @@ class DualScaleBFMSim2Sim:
             ],
             dtype=np.int32,
         )
-        actuator_ids = np.asarray(
-            [
-                _object_id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, prefix + name)
-                for name in POLICY_JOINT_NAMES
-            ],
-            dtype=np.int32,
-        )
-        sensor_id = mujoco.mj_name2id(
-            self.model,
-            mujoco.mjtObj.mjOBJ_SENSOR,
-            prefix + "imu-torso-linear-acceleration",
-        )
-        sensor = None
-        if sensor_id >= 0:
-            sensor = (
-                int(self.model.sensor_adr[sensor_id]),
-                int(self.model.sensor_dim[sensor_id]),
-            )
+        actuator_ids = []
+        for joint_id, name in zip(joint_ids, POLICY_JOINT_NAMES):
+            matches = np.flatnonzero(self.model.actuator_trnid[:, 0] == joint_id)
+            if matches.size != 1:
+                raise ValueError(
+                    f"joint {prefix + name!r} must have exactly one actuator"
+                )
+            actuator_ids.append(int(matches[0]))
+        actuator_ids = np.asarray(actuator_ids, dtype=np.int32)
+        def sensor_slice(names: tuple[str, ...]) -> tuple[int, int] | None:
+            for name in names:
+                sensor_id = mujoco.mj_name2id(
+                    self.model, mujoco.mjtObj.mjOBJ_SENSOR, prefix + name
+                )
+                if sensor_id >= 0:
+                    return (
+                        int(self.model.sensor_adr[sensor_id]),
+                        int(self.model.sensor_dim[sensor_id]),
+                    )
+            return None
+
         return RobotBinding(
             root_qpos=int(self.model.jnt_qposadr[root]),
             root_dof=int(self.model.jnt_dofadr[root]),
             joint_qpos=np.asarray(self.model.jnt_qposadr[joint_ids], dtype=np.int32),
             joint_dof=np.asarray(self.model.jnt_dofadr[joint_ids], dtype=np.int32),
             actuators=actuator_ids,
-            linacc_sensor=sensor,
+            gyro_sensor=sensor_slice(("imu_ang_vel", "imu-torso-angular-velocity")),
+            linacc_sensor=sensor_slice(
+                ("imu_lin_acc", "imu-torso-linear-acceleration")
+            ),
         )
 
     def _initialize_from_reference(self, path: Path, frame: int) -> None:
@@ -219,6 +262,9 @@ class DualScaleBFMSim2Sim:
             )
             if not np.allclose(reference_extents, self.box_half_extents, atol=1e-6):
                 raise ValueError("simulation box size does not match reference bundle")
+            self._reference_object_position = np.asarray(
+                data["training_object_body_pos_w"], dtype=np.float64
+            ).copy()
             for index, binding in enumerate(self.bindings):
                 position = data[f"training_robot_{index}_body_pos_w"][frame, 0]
                 quaternion = data[f"training_robot_{index}_body_quat_w"][frame, 0]
@@ -237,6 +283,34 @@ class DualScaleBFMSim2Sim:
         self.data.qvel[:] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
+
+    def _reference_frame(self) -> int:
+        executing_step = max(0, self._snapshot_id - self.default_pose_steps)
+        return min(
+            self.start_frame + executing_step,
+            self._reference_object_position.shape[0] - 1,
+        )
+
+    def task_termination_reason(self) -> str | None:
+        if self._snapshot_id < self.default_pose_steps:
+            return None
+        frame = self._reference_frame()
+        actual = self.data.xpos[self.box_body]
+        reference = self._reference_object_position[frame]
+        delta = actual - reference
+        z_error = abs(float(delta[2]))
+        xyz_error = float(np.linalg.norm(delta))
+        if z_error > self.object_position_z_error_m:
+            return (
+                f"object.position_z frame={frame} error={z_error:.3f}m "
+                f"threshold={self.object_position_z_error_m:.3f}m"
+            )
+        if xyz_error > self.object_position_xyz_error_m:
+            return (
+                f"object.position_xyz frame={frame} error={xyz_error:.3f}m "
+                f"threshold={self.object_position_xyz_error_m:.3f}m"
+            )
+        return None
 
     def _handler(self, robot_index: int):
         def receive(packet: LatestPacket) -> None:
@@ -277,7 +351,12 @@ class DualScaleBFMSim2Sim:
         q = self.data.qpos[binding.joint_qpos].copy().astype(np.float32)
         dq = self.data.qvel[binding.joint_dof].copy().astype(np.float32)
         quat = self.data.qpos[binding.root_qpos + 3 : binding.root_qpos + 7].copy()
-        gyro = self.data.qvel[binding.root_dof + 3 : binding.root_dof + 6].copy()
+        gyro = np.zeros(3, dtype=np.float32)
+        if binding.gyro_sensor is not None and binding.gyro_sensor[1] >= 3:
+            address = binding.gyro_sensor[0]
+            gyro = self.data.sensordata[address : address + 3].copy().astype(
+                np.float32
+            )
         linacc = np.zeros(3, dtype=np.float32)
         if binding.linacc_sensor is not None and binding.linacc_sensor[1] >= 3:
             address = binding.linacc_sensor[0]
@@ -368,9 +447,29 @@ class DualScaleBFMSim2Sim:
             )
 
     def step_policy_interval(self, commands: tuple[SimCommand, SimCommand]) -> None:
-        self.apply_commands(commands)
+        lock_roots = (
+            self.lock_roots_during_default_pose
+            and self._snapshot_id < self.default_pose_steps
+        )
         for _ in range(self.decimation):
+            # MuJoCo advances at 200 Hz while the policy produces targets at
+            # 50 Hz. Recompute PD from the latest q/dq on every physics step,
+            # matching the training environment and the OmniContact sim2sim
+            # controller. Holding one torque for the whole decimation interval
+            # introduces a stale-velocity/position impulse at every policy tick.
+            self.apply_commands(commands)
             mujoco.mj_step(self.model, self.data)
+            if lock_roots:
+                for binding, root_qpos in zip(self.bindings, self._initial_root_qpos):
+                    self.data.qpos[
+                        binding.root_qpos : binding.root_qpos + 7
+                    ] = root_qpos
+                    self.data.qvel[binding.root_dof : binding.root_dof + 6] = 0.0
+                self.data.qpos[self.box_qpos : self.box_qpos + 7] = (
+                    self._initial_box_qpos
+                )
+                self.data.qvel[self.box_dof : self.box_dof + 6] = 0.0
+                mujoco.mj_forward(self.model, self.data)
 
     def _run_loop(self, max_policy_steps: int | None) -> None:
         steps = 0
@@ -383,6 +482,11 @@ class DualScaleBFMSim2Sim:
             if commands is None:
                 break
             self.step_policy_interval(commands)
+            termination_reason = self.task_termination_reason()
+            if termination_reason is not None:
+                raise RuntimeError(
+                    "training-equivalent task termination: " + termination_reason
+                )
             self._snapshot_id += 1
             steps += 1
             if steps % max(1, int(round(self.policy_hz))) == 0:
@@ -391,9 +495,38 @@ class DualScaleBFMSim2Sim:
                     for binding in self.bindings
                 ]
                 box_z = float(self.data.xpos[self.box_body, 2])
+                joint_errors = [
+                    float(
+                        np.max(
+                            np.abs(
+                                command.q_des - self.data.qpos[binding.joint_qpos]
+                            )
+                        )
+                    )
+                    for binding, command in zip(self.bindings, commands)
+                ]
+                joint_speeds = [
+                    float(np.max(np.abs(self.data.qvel[binding.joint_dof])))
+                    for binding in self.bindings
+                ]
+                torques = [
+                    float(np.max(np.abs(self.data.ctrl[binding.actuators])))
+                    for binding in self.bindings
+                ]
+                reference_frame = self._reference_frame()
+                object_error = float(
+                    np.linalg.norm(
+                        self.data.xpos[self.box_body]
+                        - self._reference_object_position[reference_frame]
+                    )
+                )
                 print(
                     f"[sim2sim] steps={steps} sim_time={self.data.time:.2f}s "
-                    f"root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) box_z={box_z:.3f}",
+                    f"frame={reference_frame} root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) "
+                    f"box_z={box_z:.3f} object_error={object_error:.3f}m "
+                    f"q_error=({joint_errors[0]:.3f}, {joint_errors[1]:.3f})rad "
+                    f"dq_max=({joint_speeds[0]:.3f}, {joint_speeds[1]:.3f})rad/s "
+                    f"torque_max=({torques[0]:.1f}, {torques[1]:.1f})Nm",
                     flush=True,
                 )
             if self._viewer is not None:
@@ -436,6 +569,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config", default=str(ROOT / "config/g1/dual_scalebfm_residual.yaml")
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--reference-bundle", default=None)
     parser.add_argument("--max-policy-steps", type=int, default=None)
     return parser
 
@@ -444,10 +578,18 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.max_policy_steps is not None and args.max_policy_steps <= 0:
         raise SystemExit("--max-policy-steps must be positive")
-    simulation = DualScaleBFMSim2Sim(args.config, headless=args.headless)
+    simulation = DualScaleBFMSim2Sim(
+        args.config,
+        headless=args.headless,
+        reference_bundle=args.reference_bundle,
+    )
     signal.signal(signal.SIGINT, simulation.close)
     signal.signal(signal.SIGTERM, simulation.close)
-    simulation.run(max_policy_steps=args.max_policy_steps)
+    try:
+        simulation.run(max_policy_steps=args.max_policy_steps)
+    except RuntimeError as exc:
+        print(f"[sim2sim] ERROR: {exc}", flush=True)
+        return 1
     return 0
 
 

@@ -17,6 +17,12 @@ while (($#)); do
       sim_args+=(--max-policy-steps "$2")
       shift
       ;;
+    --config|--reference-bundle)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      sim_args+=("$1" "$2")
+      deploy_args+=("$1" "$2")
+      shift
+      ;;
     *)
       deploy_args+=("$1")
       ;;
@@ -26,7 +32,12 @@ done
 
 uv run python src/dual_scalebfm_sim2sim.py "${sim_args[@]}" &
 sim_pid=$!
+deploy_pid=""
 cleanup() {
+  if [[ -n "${deploy_pid}" ]]; then
+    kill "${deploy_pid}" 2>/dev/null || true
+    wait "${deploy_pid}" 2>/dev/null || true
+  fi
   kill "${sim_pid}" 2>/dev/null || true
   wait "${sim_pid}" 2>/dev/null || true
 }
@@ -37,4 +48,11 @@ uv run --extra dual-policy python src/deploy_dual_scalebfm_residual.py \
   --act-robot both \
   --confirm-actuation ENABLE_MOTORS \
   --no-visualization \
-  "${deploy_args[@]}"
+  "${deploy_args[@]}" &
+deploy_pid=$!
+
+set +e
+wait -n "${sim_pid}" "${deploy_pid}"
+status=$?
+set -e
+exit "${status}"

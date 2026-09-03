@@ -168,8 +168,9 @@ class MotionBridgeClient:
         data = packet.data
         if not isinstance(data, dict):
             raise RuntimeError("bridge returned a non-mapping state")
-        if self.state_observer is not None:
-            self.state_observer(data)
+        state_observer = getattr(self, "state_observer", None)
+        if state_observer is not None:
+            state_observer(data)
         q = np.asarray(data["q"], dtype=np.float32).reshape(-1)
         dq = np.asarray(data["dq"], dtype=np.float32).reshape(-1)
         quat = np.asarray(data["quat_wxyz"], dtype=np.float32).reshape(-1)

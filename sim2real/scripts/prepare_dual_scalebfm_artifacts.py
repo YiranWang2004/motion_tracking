@@ -16,6 +16,12 @@ SIM2REAL_ROOT = HERE.parents[1]
 DEFAULT_SOURCE = HERE.parents[3] / "Dual_G1_MJ"
 DEFAULT_OUTPUT = SIM2REAL_ROOT / "config/g1/dual_policy_artifacts"
 DEFAULT_RUN = "26-08-20_01-42-05-292432_MAPPO"
+DEFAULT_RESIDUAL_CHECKPOINT = (
+    DEFAULT_SOURCE
+    / "results/ablation_collision_omnicontact_hand/omnicontact-hand-1.5kg"
+    / "checkpoints/best_agent.pt"
+)
+DEFAULT_REFERENCE_BUNDLE = DEFAULT_SOURCE / "results/cfgen_batch_128/motion_000010.npz"
 
 
 def sha256(path: Path) -> str:
@@ -68,8 +74,21 @@ def validate_residual(path: Path) -> dict[str, object]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", default=str(DEFAULT_SOURCE))
-    parser.add_argument("--run", default=DEFAULT_RUN)
-    parser.add_argument("--reference-bundle", required=True)
+    parser.add_argument(
+        "--run",
+        default=DEFAULT_RUN,
+        help="legacy training run directory under <source-root>/dual_g1_scalebfm_residual_object",
+    )
+    parser.add_argument(
+        "--residual-checkpoint",
+        default=None,
+        help="explicit residual Actor checkpoint; overrides --run",
+    )
+    parser.add_argument(
+        "--reference-bundle",
+        default=str(DEFAULT_REFERENCE_BUNDLE),
+        help="two-robot CFGen bundle (default: training motion_000000.npz)",
+    )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
     source = Path(args.source_root).expanduser().resolve()
@@ -80,10 +99,18 @@ def main() -> int:
         "scalebfm_metadata.json": source
         / "artifacts/scalebfm/model_22200_metadata.json",
         "scalebfm_mode_table.pt": source / "artifacts/scalebfm/mode_table.pt",
-        "residual_actor.pt": source
-        / "dual_g1_scalebfm_residual_object"
-        / args.run
-        / "checkpoints/best_agent.pt",
+        "residual_actor.pt": (
+            Path(args.residual_checkpoint).expanduser().resolve()
+            if args.residual_checkpoint is not None
+            else (
+                DEFAULT_RESIDUAL_CHECKPOINT
+                if args.run == DEFAULT_RUN and source == DEFAULT_SOURCE
+                else source
+                / "dual_g1_scalebfm_residual_object"
+                / args.run
+                / "checkpoints/best_agent.pt"
+            )
+        ),
         "reference_bundle.npz": reference,
         "g1_29dof_scalebfm.xml": source
         / "src/dual_g1_mj/omnicontact/g1_29dof_kinematics.xml",

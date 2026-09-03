@@ -207,7 +207,14 @@ def main() -> int:
             client=client,
         )
 
-    default_ticks = round(float(raw.get("default_pose_duration_s", 2.0)) * control_hz)
+    default_pose_duration_s = float(raw.get("default_pose_duration_s", 2.0))
+    if args.pose_source == "sim":
+        default_pose_duration_s = float(
+            raw["simulation"].get(
+                "default_pose_duration_s", default_pose_duration_s
+            )
+        )
+    default_ticks = round(default_pose_duration_s * control_hz)
     preflight = raw.get("preflight", {})
     coordinator = DualPolicyCoordinator(
         session("a", session_values[0], observe_sim_pose=args.pose_source == "sim"),
@@ -302,7 +309,10 @@ def main() -> int:
             ticks += 1
             if ticks == 1 and coordinator.last_geometry is not None:
                 print(f"preflight geometry: {coordinator.last_geometry}")
-            if result.policy_step is not None and ticks % 50 == 0:
+            if result.policy_step is not None and (
+                result.policy_step.frame == int(raw.get("start_frame", 1))
+                or ticks % 50 == 0
+            ):
                 residual_max = float(np.max(np.abs(result.policy_step.residuals)))
                 print(
                     f"ticks={ticks} state={result.state.value} "

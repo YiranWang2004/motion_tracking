@@ -248,6 +248,12 @@ class FakePoseProvider:
 class FakeCoupledPolicy:
     def __init__(self):
         self.default_q = np.full(29, 0.1, dtype=np.float32)
+        self.start_joint_targets = np.stack(
+            (
+                np.full(29, 0.1, dtype=np.float32),
+                np.full(29, 0.15, dtype=np.float32),
+            )
+        )
         self.initialized = False
 
     def initialize(self, snapshot, **limits):
@@ -294,6 +300,7 @@ def test_production_coordinator_routes_default_then_coupled_targets():
     first = coordinator.step()
     assert first.ok and first.state == DeploymentState.EXECUTING
     np.testing.assert_allclose(robot_a.sent[-1][1], 0.1)
+    np.testing.assert_allclose(robot_b.sent[-1][1], 0.15)
     second = coordinator.step()
     assert second.ok and second.reason == "policy_target"
     np.testing.assert_allclose(robot_a.sent[-1][1], 0.2)
