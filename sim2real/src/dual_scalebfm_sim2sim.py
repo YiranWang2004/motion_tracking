@@ -111,8 +111,7 @@ class DualScaleBFMSim2Sim:
         self.lockstep_timeout_s = float(sim.get("lockstep_timeout_s", 1.0))
         self.startup_timeout_s = float(sim.get("startup_timeout_s", 60.0))
         self.command_retry_s = float(sim.get("state_retry_s", 0.05))
-        self.disabled_damping_kd = float(sim.get("disabled_damping_kd", 8.0))
-        termination = sim.get("termination", {})
+        termination = self.raw.get("task_safety", {})
         self.object_position_z_error_m = float(
             termination.get("object_position_z_error_m", 0.10)
         )
@@ -124,21 +123,36 @@ class DualScaleBFMSim2Sim:
                 self.lockstep_timeout_s,
                 self.startup_timeout_s,
                 self.command_retry_s,
-                self.disabled_damping_kd,
                 self.object_position_z_error_m,
                 self.object_position_xyz_error_m,
             )
             <= 0.0
         ):
             raise ValueError(
-                "simulation timeouts, damping, and termination thresholds must be positive"
+                "simulation timeouts and termination thresholds must be positive"
             )
 
         xml_path = _resolve(self.config_path.parent, sim["xml_path"])
-        self.model = mujoco.MjModel.from_xml_path(str(xml_path))
+        self.box_half_extents = np.asarray(
+            sim.get("box_half_extents", (0.30, 0.15, 0.15)), dtype=np.float32
+        ).reshape(3)
+        if not np.all(np.isfinite(self.box_half_extents)) or np.any(self.box_half_extents <= 0):
+            raise ValueError("box_half_extents must be finite and positive")
+        # Compile the candidate dimensions so collision bounds and inertia agree.
+        spec = mujoco.MjSpec.from_file(str(xml_path))
+        spec.geom("box_collision").size = self.box_half_extents.astype(np.float64)
+        box = spec.body("box")
+        half = self.box_half_extents.astype(np.float64)
+        box.inertia = box.mass / 3.0 * np.array([
+            half[1]**2 + half[2]**2, half[0]**2 + half[2]**2, half[0]**2 + half[1]**2,
+        ])
+        self.model = spec.compile()
         self.model.opt.timestep = 1.0 / self.physical_hz
         self.data = mujoco.MjData(self.model)
         self.bindings = (self._bind_robot("a_"), self._bind_robot("b_"))
+        dynamics_xml = sim.get("joint_dynamics_xml")
+        if dynamics_xml is not None:
+            self._load_joint_dynamics(_resolve(self.config_path.parent, dynamics_xml))
         if self.model.nu != 2 * len(POLICY_JOINT_NAMES):
             raise ValueError(f"dual model must have 58 actuators, got {self.model.nu}")
 
@@ -146,10 +160,6 @@ class DualScaleBFMSim2Sim:
         box_joint = _object_id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "box_joint")
         self.box_qpos = int(self.model.jnt_qposadr[box_joint])
         self.box_dof = int(self.model.jnt_dofadr[box_joint])
-        self.box_half_extents = np.asarray(
-            sim.get("box_half_extents", (0.30, 0.15, 0.15)), dtype=np.float32
-        ).reshape(3)
-
         torque = sim.get("torque_limits")
         if torque is None:
             metadata_path = _resolve(
@@ -177,7 +187,7 @@ class DualScaleBFMSim2Sim:
         self._initialize_from_reference(reference_path, self.start_frame)
         defaults = load_default_command(
             _resolve(
-                self.config_path.parent, sim.get("standing_asset_dir", "omnicontact")
+                self.config_path.parent, self.raw.get("control", {}).get("standing_asset_dir", "omnicontact")
             )
         )
         for binding in self.bindings:
@@ -233,6 +243,24 @@ class DualScaleBFMSim2Sim:
             "cmd_bind_host": high["cmd_host"],
             "cmd_port": int(high["cmd_port"]),
         }
+
+    def _load_joint_dynamics(self, xml_path: Path) -> None:
+        """Use the single-G1 passive joints with its unchanged LocoMode gains.
+
+        This is a fixed property of the entire simulation, not a phase-dependent
+        dynamics switch. Collision geometry and actuator torque caps are retained.
+        """
+        source = mujoco.MjModel.from_xml_path(str(xml_path))
+        source_dofs = [
+            int(source.jnt_dofadr[_object_id(source, mujoco.mjtObj.mjOBJ_JOINT, name)])
+            for name in POLICY_JOINT_NAMES
+        ]
+        for binding in self.bindings:
+            for field in ("dof_armature", "dof_damping", "dof_frictionloss"):
+                getattr(self.model, field)[binding.joint_dof] = getattr(source, field)[
+                    source_dofs
+                ]
+        print(f"[sim2sim] joint passive dynamics from {xml_path}", flush=True)
 
     def _bind_robot(self, prefix: str) -> RobotBinding:
         root = _object_id(
@@ -546,7 +574,7 @@ class DualScaleBFMSim2Sim:
                     command.qd_des - dq
                 )
             else:
-                torque = -self.disabled_damping_kd * dq
+                torque = -command.kd * dq
             self.data.ctrl[binding.actuators] = np.clip(
                 torque, -self.torque_limits, self.torque_limits
             )
@@ -610,11 +638,7 @@ class DualScaleBFMSim2Sim:
             self.step_policy_interval(commands)
             if self._phase == "stopped":
                 break
-            termination_reason = self.task_termination_reason()
-            if termination_reason is not None:
-                raise RuntimeError(
-                    "training-equivalent task termination: " + termination_reason
-                )
+            # Task tracking guards run in the shared deployment coordinator.
             self._snapshot_id += 1
             steps += 1
             if steps % max(1, int(round(self.policy_hz))) == 0:
@@ -646,10 +670,12 @@ class DualScaleBFMSim2Sim:
                         - self._reference_object_position[reference_frame]
                     )
                 )
+                frame_text = str(reference_frame) if self._phase == "executing" else "-"
+                error_text = f"{object_error:.3f}m" if self._phase == "executing" else "n/a"
                 print(
-                    f"[sim2sim] steps={steps} sim_time={self.data.time:.2f}s "
-                    f"frame={reference_frame} root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) "
-                    f"box_z={box_z:.3f} object_error={object_error:.3f}m "
+                    f"[sim2sim] phase={self._phase} steps={steps} sim_time={self.data.time:.2f}s "
+                    f"frame={frame_text} root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) "
+                    f"box_z={box_z:.3f} object_error={error_text} "
                     f"q_error=({joint_errors[0]:.3f}, {joint_errors[1]:.3f})rad "
                     f"dq_max=({joint_speeds[0]:.3f}, {joint_speeds[1]:.3f})rad/s "
                     f"torque_max=({torques[0]:.1f}, {torques[1]:.1f})Nm",

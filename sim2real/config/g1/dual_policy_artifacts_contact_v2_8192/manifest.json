@@ -66,38 +66,14 @@
       "source": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt"
     },
     "reference_bundle.npz": {
-      "sha256": "7ce29bb58b3f37d71f5e297743aabb8954cd3981aef2b47e969cf4dc9723e5f6",
-      "bytes": 1082583,
-      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_batch_128/motion_000000.npz"
+      "sha256": "eac65af4a72e34633005b2ed2ba7de408a42ffc86cf8ab6ee1ece9ab3d52a154",
+      "bytes": 1101717,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_batch_128/motion_000029.npz"
     },
     "g1_29dof_scalebfm.xml": {
       "sha256": "2a8bace5933546b3e640793ec12de03db977c3d44dcbd20bc7ae3072803f0f2d",
       "bytes": 14558,
       "source": "/home/bcj/wyr/Dual_G1_MJ/src/dual_g1_mj/omnicontact/g1_29dof_kinematics.xml"
-    }
-  },
-  "validation_notes": {
-    "checkpoint": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt",
-    "status": "simulation_candidate_training_settings_not_fully_confirmed",
-    "control_mode_evidence": "Inferred from checkpoint directory name and repository collision training scripts; TensorBoard has no hyperparameter records.",
-    "residual_scale_evidence": "0.10 is the repository deployment/training default; original run command unavailable.",
-    "reference": "cfgen_batch_128/motion_000000.npz, 753 frames, half extents [0.40829325, 0.15, 0.15]"
-  },
-  "validation_results": {
-    "offline": {
-      "steps": 500,
-      "device": "cpu",
-      "mean_ms": 4.534,
-      "p95_ms": 4.626,
-      "max_ms": 4.826,
-      "budget_ms": 18.0,
-      "passed": true
-    },
-    "sim2sim": {
-      "passed": false,
-      "stage": "loco_standing_before_residual",
-      "reason": "Both robots fell after B; A preflight rejected robot B position error 4.748 m.",
-      "rollout": "/home/bcj/wyr/motion_tracking/sim2real/logs/dual_scalebfm_contact_v2_8192/20260905_174620/rollout.npz"
     }
   }
 }

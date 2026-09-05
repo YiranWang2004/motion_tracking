@@ -17,8 +17,9 @@ import numpy as np
 import yaml
 
 from dual_runtime.deployment_recorder import DualDeploymentRecorder
-from dual_runtime.policy_coordinator import DeploymentState, DualPolicyCoordinator
-from dual_runtime.sim_control import InteractiveDualCoordinator, load_default_command
+from dual_runtime.policy_coordinator import DeploymentState
+from dual_runtime.runtime_config import shared_control_settings
+from dual_runtime.interactive_control import InteractiveDualCoordinator, load_default_command
 from dual_runtime.constants import POLICY_JOINT_NAMES
 from omnicontact.loco_mode import LocoModePolicy
 from dual_runtime.robot_session import RobotSession, RobotSessionConfig
@@ -181,6 +182,8 @@ def main() -> int:
         provider = DualVivePoseProvider(DualViveDeploymentConfig.load(vive_path))
         session_values = (raw["robot_a"], raw["robot_b"])
 
+    control = shared_control_settings(raw)
+
     def session(
         robot_id: str,
         value: dict[str, Any],
@@ -204,35 +207,28 @@ def main() -> int:
                 kp=policy.kp,
                 kd=policy.kd,
                 torque_limit=policy.torque_limit,
-                max_target_delta=float(value.get("max_target_delta", 0.005)),
-                damping_kd=float(value.get("damping_kd", 8.0)),
+                max_target_delta=control["phase_target_delta"]["default_pose"],
+                damping_kd=control["damping_kd"],
             ),
             client=client,
         )
 
-    default_pose_duration_s = float(raw.get("default_pose_duration_s", 2.0))
-    default_ticks = round(default_pose_duration_s * control_hz)
+    default_ticks = round(control["default_pose_duration_s"] * control_hz)
     preflight = raw.get("preflight", {})
-    coordinator_type = DualPolicyCoordinator
-    interactive_options = {}
-    if args.pose_source == "sim":
-        standing_assets = resolve(
-            config_path.parent, raw["simulation"].get("standing_asset_dir", "omnicontact")
-        )
-        coordinator_type = InteractiveDualCoordinator
-        interactive_options = {
-            "loco_modes": tuple(
-                LocoModePolicy(standing_assets, list(POLICY_JOINT_NAMES))
-                for _ in range(2)
-            ),
-            "default_command": load_default_command(standing_assets),
-        }
-    coordinator = coordinator_type(
+    standing_assets = resolve(config_path.parent, control["standing_asset_dir"])
+    coordinator = InteractiveDualCoordinator(
         session("a", session_values[0], observe_sim_pose=args.pose_source == "sim"),
         session("b", session_values[1]),
         provider,
         policy,
-        **interactive_options,
+        loco_modes=tuple(LocoModePolicy(standing_assets, list(POLICY_JOINT_NAMES)) for _ in range(2)),
+        default_command=load_default_command(standing_assets),
+        input_mode="sim" if args.pose_source == "sim" else "hardware",
+        transition_ticks=default_ticks,
+        phase_target_delta=control["phase_target_delta"],
+        require_button_release=control["require_button_release"],
+        max_tilt_rad=control["max_tilt_rad"],
+        task_safety=control["task_safety"],
         enable_a=args.act_robot in {"a", "both"},
         enable_b=args.act_robot in {"b", "both"},
         state_timeout_s=float(raw.get("state_timeout_s", 0.2)),
@@ -271,6 +267,8 @@ def main() -> int:
             log_dir,
             {
                 "config": str(config_path),
+                "effective_control": control,
+                "configuration": raw,
                 "reference": str(artifacts["reference_bundle"]),
                 "reference_alignment": str(raw.get("reference_alignment", "xyyaw")),
                 "start_frame": int(raw.get("start_frame", 1)),
@@ -309,6 +307,8 @@ def main() -> int:
         next_tick = start
         while True:
             if args.duration is not None and time.monotonic() - start >= args.duration:
+                if recorder is not None:
+                    recorder.metadata["exit_reason"] = "duration_reached"
                 break
             result = coordinator.step()
             if recorder is not None:
@@ -331,15 +331,15 @@ def main() -> int:
                     f"frame={result.policy_step.frame} residual_max={residual_max:.3f} "
                     f"inference_ms={1000.0 * result.policy_step.inference_time_s:.2f}"
                 )
-            if result.policy_step is not None:
+            if result.reason != "simulation_snapshot_retry":
                 consecutive_slow_ticks = (
                     consecutive_slow_ticks + 1
-                    if result.policy_step.inference_time_s > max_inference_time_s
+                    if result.processing_time_s > max_inference_time_s
                     else 0
                 )
                 if consecutive_slow_ticks >= max_consecutive_slow_ticks:
                     raise RuntimeError(
-                        "policy inference exceeded the real-time budget for "
+                        "control processing exceeded the real-time budget for "
                         f"{consecutive_slow_ticks} consecutive ticks"
                     )
             if result.state in {DeploymentState.COMPLETE, DeploymentState.STOPPED}:
@@ -350,6 +350,12 @@ def main() -> int:
                 time.sleep(delay)
             elif delay < -period:
                 next_tick = time.monotonic()
+    except BaseException as exc:
+        if recorder is not None:
+            recorder.metadata["exit_reason"] = f"{type(exc).__name__}: {exc}"
+            if coordinator.last_result is not None:
+                recorder.record(coordinator, coordinator.last_result)
+        raise
     finally:
         try:
             coordinator.close()

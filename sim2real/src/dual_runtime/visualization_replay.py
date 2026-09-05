@@ -65,9 +65,12 @@ class DualScaleBFMReplay:
             raise ValueError("reference bundle is required for rollout replay")
         self.reference = DualReferenceBundle(reference_value)
         alignment = str(self.metadata.get("reference_alignment", "xyyaw"))
+        recorded_pose = self.metadata.get("reference_alignment_pose")
+        active = np.flatnonzero(self.arrays["frame"] >= 0) if "frame" in self.arrays else []
+        first = int(active[0]) if len(active) else 0
         first_pose = RobotPose(
-            self.arrays["robot_position_w"][0, 0],
-            self.arrays["robot_quat_xyzw"][0, 0],
+            np.asarray(recorded_pose["position_w"]) if recorded_pose else self.arrays["robot_position_w"][first, 0],
+            np.asarray(recorded_pose["quaternion_xyzw"]) if recorded_pose else self.arrays["robot_quat_xyzw"][first, 0],
             0.0,
         )
         self.reference.align_to_robot_a(first_pose, mode=alignment)

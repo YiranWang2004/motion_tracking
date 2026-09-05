@@ -57,5 +57,18 @@ deploy_pid=$!
 set +e
 wait -n "${sim_pid}" "${deploy_pid}"
 status=$?
+if [[ "${status}" -eq 0 ]]; then
+  # A normal x/stop can finish the simulator before deploy has flushed its
+  # rollout. Let both normal shutdown paths finish before the EXIT cleanup.
+  wait "${sim_pid}"
+  sim_status=$?
+  wait "${deploy_pid}"
+  deploy_status=$?
+  if [[ "${sim_status}" -ne 0 ]]; then
+    status=${sim_status}
+  else
+    status=${deploy_status}
+  fi
+fi
 set -e
 exit "${status}"

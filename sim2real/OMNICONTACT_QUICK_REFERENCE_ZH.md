@@ -1,5 +1,7 @@
 # OmniContact 搬箱任务命令速查
 
+> 当前 `contact_v2_ctrl_2_8192` 候选包的完整启动命令、显式配置路径及已知问题，见 [双机 sim2sim 当前命令速查](DUAL_SIM2SIM_QUICK_REFERENCE_ZH.md)。
+
 适用仓库：`/home/yiranwang/TeleHuman/motion_tracking`。本文只整理命令与必要操作顺序；原理和坐标系定义见 `OMNICONTACT_ZH.md`。
 
 命令中的 `<...>` 是占位符，运行前必须替换为实际序列号、IP、网卡或坐标；不要连尖括号一起复制执行。
@@ -653,3 +655,6 @@ uv run python src/deploy_omnicontact.py --help
 uv run --extra vive python scripts/view_calibrated_omnicontact_poses.py --help
 uv run --extra vive python scripts/publish_vive_poses.py --help
 ```
+
+双机最新的仿真/实机共用状态机、两秒 DefaultPose 过渡、命令语义及验证限制，见
+[双 G1 流程对齐说明](DUAL_SIM_REAL_ALIGNMENT_ZH.md)。

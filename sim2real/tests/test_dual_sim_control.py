@@ -281,13 +281,16 @@ def test_mujoco_default_to_two_real_loco_modes(tmp_path, monkeypatch):
 
         client.read_next = read_next
         clients.append(client)
+    import yaml
+
+    limits = yaml.safe_load((assets / "OmniContact.yaml").read_text())
     sessions = [
         RobotSession(
             RobotSessionConfig(
                 robot_id=name,
                 udp={},
-                lower=np.full(29, -3),
-                upper=np.full(29, 3),
+                lower=limits["joint_pos_lowerlimit_lab"],
+                upper=limits["joint_pos_upperlimit_lab"],
                 kp=np.ones(29),
                 kd=np.ones(29),
                 max_target_delta=1.0,
@@ -309,7 +312,7 @@ def test_mujoco_default_to_two_real_loco_modes(tmp_path, monkeypatch):
         default_command=load_default_command(assets),
     )
     try:
-        for tick_index in range(130):
+        for tick_index in range(550):
             if tick_index == 2:
                 sim.key_callback(ord("s"))
             if tick_index == 25:
@@ -321,12 +324,22 @@ def test_mujoco_default_to_two_real_loco_modes(tmp_path, monkeypatch):
             sim.step_policy_interval(tuple(commands))
             sim._snapshot_id += 1
             assert np.all(np.isfinite(sim.data.qpos))
+            if tick_index >= 25:
+                for binding in sim.bindings:
+                    assert sim.data.qpos[binding.root_qpos + 2] > 0.6
+            assert np.all(
+                np.abs(sim.data.ctrl[sim.bindings[0].actuators])
+                <= sim.torque_limits + 1e-5
+            )
         assert coordinator.state == DeploymentState.LOCO_STANDING
         assert sim._roots_released and not sim._task_started
         assert sim.task_termination_reason() is None
+        for binding, initial in zip(sim.bindings, sim._initial_root_qpos):
+            position = sim.data.qpos[binding.root_qpos : binding.root_qpos + 3]
+            assert np.linalg.norm(position[:2] - initial[:2]) < 0.15
         for binding in sim.bindings:
             assert sim.data.qpos[binding.root_qpos + 2] > 0.6
-            # Both roots remain upright through >2 s of unsupported standing.
+            # Both roots remain upright through >10 s with production joint and torque limits.
             quaternion = sim.data.qpos[binding.root_qpos + 3 : binding.root_qpos + 7]
             assert 1 - 2 * (quaternion[1] ** 2 + quaternion[2] ** 2) > 0.9
     finally:
@@ -355,3 +368,40 @@ def test_mixed_snapshot_pair_fails_closed(runtime):
     result = tick(runtime, "start")
     assert not result.ok and result.reason == "mismatched_simulation_snapshots"
     assert all(client.sent[-1][1]["enable"] == 0 for client in runtime[1])
+
+
+def test_standing_matches_single_robot_target_path_but_residual_keeps_prelimit(runtime):
+    from dataclasses import replace
+
+    coordinator, clients, _, _ = runtime
+    for robot in coordinator.robots:
+        robot.config = replace(robot.config, torque_limit=np.full(29, 0.5))
+    tick(runtime, "start")
+    for client in clients:
+        np.testing.assert_allclose(client.sent[-1][0].target_pos, 0.1)
+    tick(runtime, "B")
+    np.testing.assert_allclose(clients[0].sent[-1][0].target_pos, 0.3)
+    np.testing.assert_allclose(clients[1].sent[-1][0].target_pos, -0.3)
+    tick(runtime, "A")
+    # The actor still uses its original predicted-torque limiter: 0.5 / kp(20).
+    np.testing.assert_allclose(clients[0].sent[-1][0].target_pos, 0.025)
+    np.testing.assert_allclose(clients[1].sent[-1][0].target_pos, -0.025)
+
+
+def test_udp_retry_on_one_side_is_drained_before_control(runtime):
+    from dataclasses import replace
+
+    coordinator, clients, _, _ = runtime
+    clients[0].stamp = 20
+    replies = iter([19, 20])
+    original_read = clients[1].read_next
+
+    def read_with_stale_retry(timeout):
+        return replace(original_read(timeout), state_receive_time_ns=next(replies))
+
+    clients[1].read_next = read_with_stale_retry
+    result = tick(runtime, "start")
+    assert result.ok and result.state == DeploymentState.DEFAULT_POSE
+    for client in clients:
+        assert client.sent[-1][1]["state"].state_receive_time_ns == 20
+        assert len(client.sent) == 1

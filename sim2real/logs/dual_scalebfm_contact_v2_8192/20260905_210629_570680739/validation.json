@@ -1,0 +1,22 @@
+{
+  "motion": "motion_000029.npz",
+  "passed": true,
+  "log_directory": "logs/dual_scalebfm_contact_v2_8192/20260905_210629_570680739",
+  "standing_before_A_seconds": 2,
+  "reference_frames": 598,
+  "emitted_frames": [
+    1,
+    597
+  ],
+  "emitted_count": 597,
+  "post_task_standing_ticks": 404,
+  "final_pelvis_height_m": [
+    0.7685756087303162,
+    0.7680194973945618
+  ],
+  "max_object_height_m": 0.7713131904602051,
+  "max_checked_object_z_error_m": 0.08053195476531982,
+  "max_checked_object_xyz_error_m": 0.2369108647108078,
+  "task_processing_p95_ms": 8.17181379970861,
+  "final_state": "stopped"
+}

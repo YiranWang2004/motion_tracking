@@ -1,0 +1,13 @@
+{
+  "config": "/home/bcj/wyr/motion_tracking/sim2real/config/g1/dual_scalebfm_contact_v2_8192.yaml",
+  "reference": "/home/bcj/wyr/motion_tracking/sim2real/config/g1/dual_policy_artifacts_contact_v2_8192/reference_bundle.npz",
+  "reference_alignment": "xyyaw",
+  "start_frame": 1,
+  "pose_source": "sim",
+  "vive_config": null,
+  "device": "cpu",
+  "act_robot": "both",
+  "control_frequency_hz": 50.0,
+  "ticks": 1,
+  "saved_at_unix_s": 1788607541.5287855
+}

@@ -3,6 +3,19 @@ state_timeout_s: 0.20
 pose_timeout_s: 0.10
 max_state_skew_s: 0.05
 default_pose_duration_s: 2.0
+# Shared by simulation and hardware. Backend sections contain transport only.
+control:
+  standing_asset_dir: omnicontact
+  damping_kd: 8.0
+  max_tilt_rad: 0.7
+  require_button_release: true
+  phase_target_delta:
+    default_pose: 0.02
+    loco_standing: 1.0
+    executing: 1.0
+task_safety:
+  object_position_z_error_m: 0.1
+  object_position_xyz_error_m: 0.3
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: "../../logs/dual_scalebfm_residual"
@@ -31,21 +44,16 @@ visualization:
 # Simulation uses an interactive s/b/a/x coordinator with independent LocoModes. Loopback-only ports make accidental robot actuation impossible.
 simulation:
   xml_path: "assets/dual_scalebfm_sim.xml"
+  # Original single-G1 joint inertia/damping/friction for its LocoMode PD.
+  # Applied for the whole rollout; training collision geometry is retained.
+  joint_dynamics_xml: assets/g1_29dof.xml
   physical_frequency_hz: 200
-  # Match the single-G1 interactive DefaultPose and independent LocoModes.
-  standing_asset_dir: "omnicontact"
   initial_root_height_m: 0.793
   startup_timeout_s: 60.0
   lockstep_timeout_s: 1.0
   state_retry_s: 0.05
-  disabled_damping_kd: 8.0
   # Geometry of the default CFGen training bundle (motion_000000.npz).
   box_half_extents: [0.40829325, 0.15, 0.15]
-  # Training task termination thresholds. Stop the rollout at the first failed
-  # frame instead of continuing invalid dynamics until a robot falls.
-  termination:
-    object_position_z_error_m: 0.10
-    object_position_xyz_error_m: 0.30
   robots:
     robot_a:
       udp:
@@ -53,18 +61,12 @@ simulation:
         state_port: 56001
         cmd_host: "127.0.0.1"
         cmd_port: 56002
-      # Training applies each 50 Hz target directly; torque clipping remains
-      # active in RobotSession and in the MuJoCo bridge.
-      max_target_delta: 1.0
-      damping_kd: 8.0
     robot_b:
       udp:
         state_bind_host: "127.0.0.1"
         state_port: 56101
         cmd_host: "127.0.0.1"
         cmd_port: 56102
-      max_target_delta: 1.0
-      damping_kd: 8.0
 
 preflight:
   max_partner_position_error_m: 0.20
@@ -91,8 +93,6 @@ robot_a:
     state_port: 55001
     cmd_host: "10.201.1.2"
     cmd_port: 55002
-  max_target_delta: 0.005
-  damping_kd: 8.0
 
 robot_b:
   udp:
@@ -100,7 +100,5 @@ robot_b:
     state_port: 55101
     cmd_host: "10.201.2.2"
     cmd_port: 55102
-  max_target_delta: 0.005
-  damping_kd: 8.0
 
 vive_config: "omnicontact_vive_dual.json"

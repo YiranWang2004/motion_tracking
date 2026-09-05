@@ -1,5 +1,7 @@
 # Dual G1 ScaleBFM Residual 实机部署
 
+> 当前 `contact_v2_ctrl_2_8192` 候选包的完整启动命令、显式配置路径及已知问题，见 [双机 sim2sim 当前命令速查](DUAL_SIM2SIM_QUICK_REFERENCE_ZH.md)。
+
 本入口沿用已经通过 A-only、B-only、both 实机测试的双 namespace 和双
 `g1_udp_bridge`。正式策略进程只通过两组 UDP endpoint 向 bridge 发送 29 维绝对 PD
 目标，不直接加入 Unitree DDS 网络。
@@ -23,7 +25,7 @@ Dual_G1_MJ/results/ablation_collision_omnicontact_hand/
 
 默认 reference 是训练集第一条 `motion_000000.npz`。reference 必须是带 `training_*`
 字段的双机 bundle，并且必须与要执行的箱子尺寸和
-初始 A/B/箱子几何一致。入口会在发出电机指令前检查这些条件。
+初始 A/B/箱子几何一致。任务几何条件在按 A 进入搬运策略前检查；DefaultPose/LocoMode 在此之前运行。
 
 ## 2. 配置三台 Tracker
 
@@ -176,7 +178,7 @@ viewer 使用相同的 `--visualization-host/--visualization-port`。A/B mirror 
 
 ### 5.2 无电机和分阶段使能
 
-第一阶段只运行全部感知、FK、ScaleBFM 和 Actor，不使能电机：
+第一阶段检查感知和控制接口，`--act-robot none` 仍发送零力矩/阻尼命令，不能当作被动监听；策略推理需按顺序按键进入：
 
 ```bash
 bash scripts/run_dual_scalebfm_residual.sh \
@@ -203,11 +205,16 @@ bash scripts/run_dual_scalebfm_residual.sh \
   --act-robot both --confirm-actuation ENABLE_MOTORS
 ```
 
-前 2 秒按 A/B 各自的 joint reference 平滑进入 `start_frame`（与训练 reset 一致），
-之后才从该帧执行 ScaleBFM + residual policy。不能用 ScaleBFM 的通用 `default_q`
-代替这个初始关节姿态，否则策略启动时已经偏离训练状态。
+实机和仿真现在都等待人工门控：`ZERO TORQUE → Start/s → 两秒 DefaultPose
+过渡 → DefaultPose ready → B/b → LocoMode standing → A/a → ScaleBFM + residual
+→ reference 完成后回到 LocoMode → Stop/x`。Start/B/A 必须按顺序重新按下，启动时
+已按住的键不会触发阶段切换；提前按 B 后需松开并在 ready 后重新按下。
+实机没有浮动基座锁定，应按实际支撑条件完成 DefaultPose 过渡和站立确认。
+四秒 `--duration` 示例只适合短时接口检查，包含等待按键时间，不会自动启动任务。
+详见 [仿真实机流程对齐说明](DUAL_SIM_REAL_ALIGNMENT_ZH.md)。
+
 任一 bridge 状态超时、双机 state skew 超限、任一 Tracker 丢失、几何预检失败、模型出现
-非有限值或连续三帧推理超时，都会对两侧发送禁用 hold 并退出。
+非有限值或连续三帧控制处理超时，都会对两侧发送禁用 hold 并退出。
 
 ## 6. 更换 reference 或 checkpoint
 
@@ -236,9 +243,15 @@ Tracker fail-closed 检查。
 
 ## 8. 双机器人 sim2sim：与单机一致的按键控制
 
+2026-09-05 站立修复：DefaultPose/LocoMode 使用与单机一致的关节目标限制流程，
+实际力矩仍在每个 200 Hz 物理子步裁剪。`simulation.joint_dynamics_xml` 从单机
+`assets/g1_29dof.xml` 读取关节 armature、阻尼和摩擦，对整个仿真固定生效。
+保留双机碰撞几何，但不再声称与原训练 XML 的被动动力学完全相同。
+详见 [倒地原因与修复验证](DUAL_LOCOMODE_FIX_ZH.md)。
+
 双机 sim2sim 使用一个共享 MuJoCo 世界替换两台 bridge 和三 Tracker 输入，
 搬箱仍运行 `deploy_dual_scalebfm_residual.py` 的 ScaleBFM + residual。
-仿真使用独立的交互 coordinator；实机仍保留原来的 2 秒 reference 初始姿态过渡。
+仿真和实机共用 `InteractiveDualCoordinator`，包括两秒 DefaultPose 过渡及 Start/B/A/Stop 门控。
 仿真两路端口为 `127.0.0.1:56001/56002` 和 `127.0.0.1:56101/56102`。
 
 先完成第 1 节策略产物准备；`config/g1/dual_policy_artifacts` 中必须有 manifest、
@@ -255,7 +268,7 @@ bash scripts/run_dual_scalebfm_sim2sim.sh
 操作顺序与单机一致，按键在 MuJoCo 窗口输入：
 
 1. 等待部署终端打印 `ZERO TORQUE`。两台机器人已在原版 DefaultPose，物理暂不推进。
-2. 按 `s`：持续保持原版 DefaultPose，两个 floating base 和箱子保持锁定。
+2. 按 `s`：两秒过渡到原版 DefaultPose，等待 `DefaultPose ready`，两个 floating base 和箱子保持锁定。
 3. 确认姿态稳定后按 `b`：两路同一状态帧的 LocoMode 命令到齐，才同步释放 base 和箱子。
 4. 等待 `LocoMode standing` 并确认两台机器人稳定，按 `a`：使用新鲜双机位姿做
    reference 对齐、几何预检，随后运行搬箱策略。两台头顶的红色圆柱消失。

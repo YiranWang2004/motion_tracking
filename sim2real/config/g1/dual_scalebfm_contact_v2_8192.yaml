@@ -4,6 +4,19 @@ state_timeout_s: 0.2
 pose_timeout_s: 0.1
 max_state_skew_s: 0.05
 default_pose_duration_s: 2.0
+# Shared by simulation and hardware. Backend sections contain transport only.
+control:
+  standing_asset_dir: omnicontact
+  damping_kd: 8.0
+  max_tilt_rad: 0.7
+  require_button_release: true
+  phase_target_delta:
+    default_pose: 0.02
+    loco_standing: 1.0
+    executing: 1.0
+task_safety:
+  object_position_z_error_m: 0.1
+  object_position_xyz_error_m: 0.3
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: ../../logs/dual_scalebfm_contact_v2_8192
@@ -22,20 +35,18 @@ visualization:
   port: 55204
 simulation:
   xml_path: assets/dual_scalebfm_sim.xml
+  # Original single-G1 joint inertia/damping/friction for its LocoMode PD.
+  # Applied for the whole rollout; training collision geometry is retained.
+  joint_dynamics_xml: assets/g1_29dof.xml
   physical_frequency_hz: 200
-  standing_asset_dir: omnicontact
   initial_root_height_m: 0.793
   startup_timeout_s: 60.0
   lockstep_timeout_s: 1.0
   state_retry_s: 0.05
-  disabled_damping_kd: 8.0
   box_half_extents:
-  - 0.40829325
+  - 0.48190537
   - 0.15
   - 0.15
-  termination:
-    object_position_z_error_m: 0.1
-    object_position_xyz_error_m: 0.3
   robots:
     robot_a:
       udp:
@@ -43,16 +54,12 @@ simulation:
         state_port: 56001
         cmd_host: 127.0.0.1
         cmd_port: 56002
-      max_target_delta: 1.0
-      damping_kd: 8.0
     robot_b:
       udp:
         state_bind_host: 127.0.0.1
         state_port: 56101
         cmd_host: 127.0.0.1
         cmd_port: 56102
-      max_target_delta: 1.0
-      damping_kd: 8.0
 preflight:
   max_partner_position_error_m: 0.2
   max_object_position_error_m: 0.2
@@ -75,16 +82,12 @@ robot_a:
     state_port: 55001
     cmd_host: 10.201.1.2
     cmd_port: 55002
-  max_target_delta: 0.005
-  damping_kd: 8.0
 robot_b:
   udp:
     state_bind_host: 10.201.2.1
     state_port: 55101
     cmd_host: 10.201.2.2
     cmd_port: 55102
-  max_target_delta: 0.005
-  damping_kd: 8.0
 vive_config: omnicontact_vive_dual.json
 artifact_validation_notes:
   checkpoint: /home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt
@@ -93,5 +96,5 @@ artifact_validation_notes:
     training scripts; TensorBoard has no hyperparameter records.
   residual_scale_evidence: 0.10 is the repository deployment/training default; original
     run command unavailable.
-  reference: cfgen_batch_128/motion_000000.npz, 753 frames, half extents [0.40829325,
+  reference: cfgen_batch_128/motion_000029.npz, 598 frames, half extents [0.48190537,
     0.15, 0.15]

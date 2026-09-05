@@ -22,8 +22,13 @@ def configure_test_scene(tmp_path, monkeypatch):
     raw = yaml.safe_load(CONFIG.read_text())
     sim = raw["simulation"]
     sim["xml_path"] = str((CONFIG.parent / sim["xml_path"]).resolve())
-    sim["standing_asset_dir"] = str(CONFIG.parent / "omnicontact")
-    sim["torque_limits"] = [88.0] * 29
+    raw.setdefault("control", {})["standing_asset_dir"] = str(CONFIG.parent / "omnicontact")
+    sim["joint_dynamics_xml"] = str(
+        (CONFIG.parent / sim["joint_dynamics_xml"]).resolve()
+    )
+    sim["torque_limits"] = yaml.safe_load(
+        (CONFIG.parent / "bridge_omnicontact.yaml").read_text()
+    )["torque_limits"]
     reference = tmp_path / "reference.npz"
     arrays = {
         "training_joint_order": np.asarray(POLICY_JOINT_NAMES),
@@ -178,7 +183,7 @@ def test_enable_zero_is_damping_and_enable_one_is_pd():
             sim.data.ctrl[a.actuators], np.minimum(10.0, sim.torque_limits), atol=1e-6
         )
         np.testing.assert_allclose(
-            sim.data.ctrl[b.actuators], -sim.disabled_damping_kd * 0.5, atol=1e-6
+            sim.data.ctrl[b.actuators], -command(sim, 1, enable=0).kd * 0.5, atol=1e-6
         )
     finally:
         sim.close()
@@ -350,5 +355,48 @@ def test_keyboard_snapshot_is_atomic_across_robots_and_retries():
         sim.publish_state_pair(40)
         assert sim.transports[0].states[-1]["buttons"]["stop"]
         assert not sim.transports[0].states[-1]["buttons"]["A"]
+    finally:
+        sim.close()
+
+
+def test_joint_passive_dynamics_match_single_g1_for_both_robots():
+    sim = make_sim()
+    try:
+        source = mujoco.MjModel.from_xml_path(
+            str(ROOT / "config/g1/assets/g1_29dof.xml")
+        )
+        dofs = [
+            source.jnt_dofadr[
+                mujoco.mj_name2id(source, mujoco.mjtObj.mjOBJ_JOINT, name)
+            ]
+            for name in POLICY_JOINT_NAMES
+        ]
+        for binding in sim.bindings:
+            for field in ("dof_armature", "dof_damping", "dof_frictionloss"):
+                np.testing.assert_array_equal(
+                    getattr(sim.model, field)[binding.joint_dof],
+                    getattr(source, field)[dofs],
+                )
+    finally:
+        sim.close()
+
+
+def test_reference_box_dimensions_update_collision_and_inertia():
+    raw = yaml.safe_load(CONFIG.read_text())
+    half = np.array([.48, .15, .15])
+    raw['simulation']['box_half_extents'] = half.tolist()
+    reference = Path(raw['artifacts']['directory']) / raw['artifacts']['reference_bundle']
+    with np.load(reference) as data:
+        arrays = {key:data[key] for key in data.files}
+    arrays['training_box_half_extents'] = half
+    np.savez(reference, **arrays)
+    CONFIG.write_text(yaml.safe_dump(raw))
+    sim = make_sim()
+    try:
+        geom = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_GEOM, 'box_collision')
+        np.testing.assert_allclose(sim.model.geom_size[geom], half)
+        mass = sim.model.body_mass[sim.box_body]
+        np.testing.assert_allclose(sim.model.body_inertia[sim.box_body], mass / 3 * np.array([
+            half[1]**2 + half[2]**2,half[0]**2 + half[2]**2,half[0]**2 + half[1]**2]))
     finally:
         sim.close()

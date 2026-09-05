@@ -33,6 +33,7 @@ class CoordinatorResult:
     state: DeploymentState
     reason: str
     policy_step: Any | None = None
+    processing_time_s: float = 0.0
 
 
 class DualPolicyCoordinator:
@@ -111,9 +112,15 @@ class DualPolicyCoordinator:
     def _send_hold(self, states: tuple[BridgeState, BridgeState] | None) -> None:
         if states is None:
             states = tuple(robot.last_state for robot in self.robots)  # type: ignore[assignment]
+        errors = []
         for robot, state in zip(self.robots, states):
             if state is not None:
-                robot.send_hold(state, enable=0)
+                try:
+                    robot.send_hold(state, enable=0)
+                except Exception as exc:
+                    errors.append(exc)
+        if errors:
+            raise errors[0]
 
     def step(self) -> CoordinatorResult:
         states, snapshot, reason = self._read_inputs()

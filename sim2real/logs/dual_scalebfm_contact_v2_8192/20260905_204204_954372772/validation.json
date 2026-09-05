@@ -1,0 +1,23 @@
+{
+  "standing_ticks": 751,
+  "standing_final_height_m": [
+    0.7677488923072815,
+    0.7677488923072815
+  ],
+  "standing_max_tilt_deg": [
+    8.360624313354492,
+    8.360624313354492
+  ],
+  "standing_processing_p95_ms": 1.139935499850253,
+  "last_task_frame": -1,
+  "final_state": "stopped",
+  "final_reason": "stop",
+  "final_enable": [
+    0,
+    0
+  ],
+  "final_kp_max": 0.0,
+  "final_kd": [
+    8.0
+  ]
+}

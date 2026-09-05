@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "task": "dual_g1_scalebfm_residual_object",
+  "control_frequency_hz": 50,
+  "checkpoint_contract": {
+    "control_architecture": "decentralized",
+    "actor_sharing": "shared",
+    "actor_observation": "current",
+    "box_observation": "actual",
+    "residual_joints": "whole-body",
+    "residual_scale": 0.1,
+    "agents": {
+      "robot_0": {
+        "actor_input": [
+          512,
+          201
+        ],
+        "actor_output": [
+          29,
+          128
+        ],
+        "running_mean": [
+          201
+        ],
+        "running_variance": [
+          201
+        ]
+      },
+      "robot_1": {
+        "actor_input": [
+          512,
+          201
+        ],
+        "actor_output": [
+          29,
+          128
+        ],
+        "running_mean": [
+          201
+        ],
+        "running_variance": [
+          201
+        ]
+      }
+    }
+  },
+  "files": {
+    "scalebfm_model.pt": {
+      "sha256": "88d5a79946c03ed25503f48b2af71d16290844ef066ca9b6c8fa8dc3837422e3",
+      "bytes": 72856655,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/model_22200.pt"
+    },
+    "scalebfm_metadata.json": {
+      "sha256": "3024f18136314fade2676e22d6eafb1a8b2befa388da55b0885a53fcb1368d16",
+      "bytes": 7258,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/model_22200_metadata.json"
+    },
+    "scalebfm_mode_table.pt": {
+      "sha256": "fca11f2399bced32517b51c7f9dcf13c97117ca469b0b32e207d8f7d664fbde9",
+      "bytes": 2046,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/mode_table.pt"
+    },
+    "residual_actor.pt": {
+      "sha256": "f4f550e236abaa5d5e0ef0a997076fc52005dee7c851647659d66d2b8aa1c86c",
+      "bytes": 18729067,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt"
+    },
+    "reference_bundle.npz": {
+      "sha256": "7ce29bb58b3f37d71f5e297743aabb8954cd3981aef2b47e969cf4dc9723e5f6",
+      "bytes": 1082583,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_batch_128/motion_000000.npz"
+    },
+    "g1_29dof_scalebfm.xml": {
+      "sha256": "2a8bace5933546b3e640793ec12de03db977c3d44dcbd20bc7ae3072803f0f2d",
+      "bytes": 14558,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/src/dual_g1_mj/omnicontact/g1_29dof_kinematics.xml"
+    }
+  }
+}

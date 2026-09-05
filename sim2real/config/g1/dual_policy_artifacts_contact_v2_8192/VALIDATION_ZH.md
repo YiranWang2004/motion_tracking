@@ -1,5 +1,11 @@
 # contact_v2_ctrl_2_8192 候选部署产物
 
+> 当前默认 reference 已改为 `cfgen_batch_128/motion_000029.npz`（598 帧）。
+> 已通过完整 sim2sim 跟踪、返回 LocoMode 及继续站立验证。
+> 箱子半尺寸为 `[0.48190537, 0.15, 0.15]` m；模型及 checkpoint 未更换。
+> 详细筛选记录见 [默认 motion 筛选报告](../../../DUAL_DEFAULT_MOTION_SELECTION_ZH.md)。
+> 下文旧的倒地及 motion_000000 测试只保留为历史记录，不是当前验收结论。
+
 来源：`/home/bcj/wyr/Dual_G1_MJ`。使用
 `saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt`；
 它不是原默认配置指定的 `omnicontact-hand-1.5kg` checkpoint。
@@ -9,11 +15,11 @@
 `control_mode=2` 根据目录名及仓库训练脚本推定；`residual_scale=0.10` 沿用仓库默认值。
 原始训练命令尚未确认，TensorBoard 仅含 scalar，没有完整超参数记录。
 
-## 验证结果
+## 历史验证结果（motion_000000，首次准备时）
 
 - A/B actor 输入 201 维，输出 29 维；两侧 policy/preprocessor 相同，符合共享 actor 结构。
-- 默认 reference 含全部所需 training 字段，共 753 帧；箱子半尺寸
-  `[0.40829325, 0.15, 0.15]` 与当前仿真配置一致。
+- 当时 reference 含全部所需 training 字段，共 753 帧；箱子半尺寸
+  `[0.40829325, 0.15, 0.15]` 与当时仿真配置一致。
 - 500 步 CPU 离线验证通过，平均 4.534 ms、P95 4.626 ms、最大 4.826 ms；预算 18 ms。
 - 真实 reference 的 headless 物理测试失败：`s` 保持 DefaultPose 正常，
   `b` 后 LocoMode 站立失稳，两台 pelvis 高度从 0.793 m 降至约 0.10 m。
@@ -37,4 +43,4 @@ bash scripts/run_dual_scalebfm_sim2sim.sh \
 ```
 
 仿真按 `s → b`，观察是否稳定；若失稳则按 `x` 停止，不要继续按 `a`。
-当前应先排查真实配置下的 LocoMode/PD/限位衔接，再验证搬箱。
+当前操作：s → 等待 DefaultPose ready → b → 确认稳定 → a；完成后返回站立，按 x 退出。

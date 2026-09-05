@@ -1,0 +1,26 @@
+{
+  "loco_ticks": 1500,
+  "duration_s": 29.976058863000002,
+  "height_min_m": [
+    0.7516859769821167,
+    0.751736581325531
+  ],
+  "height_max_m": [
+    0.7929999828338623,
+    0.7929999828338623
+  ],
+  "height_final_m": [
+    0.7688989639282227,
+    0.7689002156257629
+  ],
+  "final_xy_displacement_m": [
+    0.04035618156194687,
+    0.040310088545084
+  ],
+  "max_tilt_degrees": [
+    8.360624313354492,
+    8.360624313354492
+  ],
+  "last_state": "stopped",
+  "rollout": "/home/bcj/wyr/motion_tracking/sim2real/logs/dual_scalebfm_contact_v2_8192/20260905_183102/rollout.npz"
+}

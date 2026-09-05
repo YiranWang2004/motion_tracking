@@ -1,0 +1,23 @@
+{
+  "standing_ticks": 250,
+  "standing_final_height_m": [
+    0.7687342166900635,
+    0.7687342166900635
+  ],
+  "standing_max_tilt_deg": [
+    8.360624313354492,
+    8.360624313354492
+  ],
+  "standing_processing_p95_ms": 1.437388949398155,
+  "last_task_frame": 68,
+  "final_state": "fault",
+  "final_reason": "RuntimeError: robot 0 tilt 0.754 rad exceeds 0.700",
+  "final_enable": [
+    0,
+    0
+  ],
+  "final_kp_max": 0.0,
+  "final_kd": [
+    8.0
+  ]
+}

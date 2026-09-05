@@ -72,6 +72,7 @@ class RobotSession:
         )
         self.last_state: BridgeState | None = None
         self.last_command: PDCommand | None = None
+        self.last_enable = 0
 
     def read(self, timeout_s: float) -> BridgeState | None:
         state = self.client.read_next(timeout_s)
@@ -100,13 +101,22 @@ class RobotSession:
         *,
         enable: int,
         sim_control: dict[str, Any] | None = None,
+        limit_estimated_torque: bool = True,
     ) -> PDCommand:
+        if enable not in (0, 1):
+            raise ValueError("enable must be 0 or 1")
+        if not enable:
+            # The hardware bridge forwards PD gains even when enable=0.
+            # Encode disabled operation explicitly, including true zero torque.
+            active = desired.kp is not None and np.any(desired.kp != 0)
+            kd = np.full(29, self.config.damping_kd) if active else desired.kd
+            desired = PDCommand(state.q_lab.copy(), np.zeros(29), kd)
         if self.limiter.last_target is None:
             self.prepare(state)
         command = self.limiter.apply(desired)
         kp = np.zeros(29) if command.kp is None else command.kp
         kd = np.zeros(29) if command.kd is None else command.kd
-        if self.config.torque_limit is not None:
+        if limit_estimated_torque and self.config.torque_limit is not None:
             estimated = kp * (command.target_pos - state.q_lab) - kd * state.dq_lab
             limited = np.clip(
                 estimated, -self.config.torque_limit, self.config.torque_limit
@@ -124,6 +134,7 @@ class RobotSession:
             self.limiter.last_target = safe_target.copy()
         kwargs = {} if sim_control is None else {"sim_control": sim_control}
         self.client.send(command, enable=enable, state=state, **kwargs)
+        self.last_enable = enable
         self.last_command = command
         return command
 
@@ -132,6 +143,7 @@ class RobotSession:
         kd = np.full(29, self.config.damping_kd, dtype=np.float32)
         command = self.limiter.hold(state.q_lab, kp, kd)
         self.client.send(command, enable=enable, state=state)
+        self.last_enable = enable
         self.last_command = command
         return command
 

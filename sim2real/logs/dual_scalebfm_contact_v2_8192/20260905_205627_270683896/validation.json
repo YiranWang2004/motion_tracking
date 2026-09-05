@@ -1,0 +1,12 @@
+{
+  "last_sent_task_frame": 143,
+  "last_state": "fault",
+  "last_reason": "RuntimeError: object.position_z frame=143 error=0.103m",
+  "max_box_height_m": 0.5470967292785645,
+  "final_enable": [
+    0,
+    0
+  ],
+  "final_kp_max": 0.0,
+  "full_motion_completed": false
+}
