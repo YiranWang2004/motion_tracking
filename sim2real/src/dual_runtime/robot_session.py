@@ -47,7 +47,9 @@ class RobotSessionConfig:
         if torque_limit is not None and (
             np.any(torque_limit <= 0.0) or not np.all(np.isfinite(torque_limit))
         ):
-            raise ValueError(f"torque limits must be positive for robot {self.robot_id}")
+            raise ValueError(
+                f"torque limits must be positive for robot {self.robot_id}"
+            )
         object.__setattr__(self, "lower", lower.copy())
         object.__setattr__(self, "upper", upper.copy())
         object.__setattr__(self, "kp", kp.copy())
@@ -60,7 +62,9 @@ class RobotSessionConfig:
 class RobotSession:
     """Per-robot bridge client, limiter, and last received state."""
 
-    def __init__(self, config: RobotSessionConfig, client: MotionBridgeClient | None = None):
+    def __init__(
+        self, config: RobotSessionConfig, client: MotionBridgeClient | None = None
+    ):
         self.config = config
         self.client = client or MotionBridgeClient(config.udp)
         self.limiter = CommandLimiter(
@@ -78,33 +82,48 @@ class RobotSession:
     def prepare(self, state: BridgeState) -> None:
         self.limiter.reset(state.q_lab)
 
-    def send_target(self, target: np.ndarray, state: BridgeState, *, enable: int) -> PDCommand:
+    def send_target(
+        self, target: np.ndarray, state: BridgeState, *, enable: int
+    ) -> PDCommand:
+        return self.send_pd(
+            PDCommand(
+                np.asarray(target, dtype=np.float32), self.config.kp, self.config.kd
+            ),
+            state,
+            enable=enable,
+        )
+
+    def send_pd(
+        self,
+        desired: PDCommand,
+        state: BridgeState,
+        *,
+        enable: int,
+        sim_control: dict[str, Any] | None = None,
+    ) -> PDCommand:
         if self.limiter.last_target is None:
             self.prepare(state)
-        command = self.limiter.apply(
-            PDCommand(np.asarray(target, dtype=np.float32), self.config.kp, self.config.kd)
-        )
+        command = self.limiter.apply(desired)
+        kp = np.zeros(29) if command.kp is None else command.kp
+        kd = np.zeros(29) if command.kd is None else command.kd
         if self.config.torque_limit is not None:
-            estimated = (
-                self.config.kp * (command.target_pos - state.q_lab)
-                - self.config.kd * state.dq_lab
-            )
+            estimated = kp * (command.target_pos - state.q_lab) - kd * state.dq_lab
             limited = np.clip(
                 estimated, -self.config.torque_limit, self.config.torque_limit
             )
             safe_target = command.target_pos.copy()
-            active = self.config.kp > 1.0e-6
+            active = kp > 1.0e-6
             safe_target[active] = (
                 state.q_lab[active]
-                + (limited[active] + self.config.kd[active] * state.dq_lab[active])
-                / self.config.kp[active]
+                + (limited[active] + kd[active] * state.dq_lab[active]) / kp[active]
             )
             safe_target = np.clip(
                 safe_target, self.config.lower, self.config.upper
             ).astype(np.float32)
-            command = PDCommand(safe_target, self.config.kp, self.config.kd)
+            command = PDCommand(safe_target, kp, kd)
             self.limiter.last_target = safe_target.copy()
-        self.client.send(command, enable=enable, state=state)
+        kwargs = {} if sim_control is None else {"sim_control": sim_control}
+        self.client.send(command, enable=enable, state=state, **kwargs)
         self.last_command = command
         return command
 

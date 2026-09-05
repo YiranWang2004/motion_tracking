@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 
 class DeploymentState(str, Enum):
+    ZERO_TORQUE = "zero_torque"
+    LOCO_STANDING = "loco_standing"
+    STOPPED = "stopped"
     WAITING = "waiting"
     DEFAULT_POSE = "default_pose"
     EXECUTING = "executing"

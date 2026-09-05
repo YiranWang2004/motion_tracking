@@ -3,6 +3,11 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import pytest
+import yaml
+from dataclasses import replace
+from dual_runtime.constants import POLICY_JOINT_NAMES
+from dual_runtime.sim_control import load_default_command
 
 from dual_runtime.sim_pose_provider import DualSimulationPoseProvider
 from dual_scalebfm_sim2sim import DualScaleBFMSim2Sim, SimCommand
@@ -10,6 +15,41 @@ from dual_scalebfm_sim2sim import DualScaleBFMSim2Sim, SimCommand
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "config/g1/dual_scalebfm_residual.yaml"
+
+
+def configure_test_scene(tmp_path, monkeypatch):
+    """Exercise real MuJoCo without depending on untracked policy checkpoints."""
+    raw = yaml.safe_load(CONFIG.read_text())
+    sim = raw["simulation"]
+    sim["xml_path"] = str((CONFIG.parent / sim["xml_path"]).resolve())
+    sim["standing_asset_dir"] = str(CONFIG.parent / "omnicontact")
+    sim["torque_limits"] = [88.0] * 29
+    reference = tmp_path / "reference.npz"
+    arrays = {
+        "training_joint_order": np.asarray(POLICY_JOINT_NAMES),
+        "training_box_half_extents": np.asarray(sim["box_half_extents"]),
+        "training_object_body_pos_w": np.tile([0.0, 0.5, 0.15], (4, 1)),
+        "training_object_body_quat_w": np.tile([1.0, 0.0, 0.0, 0.0], (4, 1)),
+    }
+    for index in range(2):
+        arrays[f"training_robot_{index}_body_pos_w"] = np.tile(
+            [0.0, index * 1.2, 0.8], (4, 1, 1)
+        )
+        arrays[f"training_robot_{index}_body_quat_w"] = np.tile(
+            [1.0, 0.0, 0.0, 0.0], (4, 1, 1)
+        )
+        arrays[f"training_robot_{index}_joint_pos"] = np.zeros((4, 29))
+    np.savez(reference, **arrays)
+    raw["artifacts"]["directory"] = str(tmp_path)
+    raw["artifacts"]["reference_bundle"] = reference.name
+    config = tmp_path / "sim.yaml"
+    config.write_text(yaml.safe_dump(raw))
+    monkeypatch.setattr(__import__(__name__), "CONFIG", config)
+
+
+@pytest.fixture(autouse=True)
+def isolated_reference(tmp_path, monkeypatch):
+    configure_test_scene(tmp_path, monkeypatch)
 
 
 class FakeLowTransport:
@@ -30,7 +70,16 @@ def make_sim():
     return DualScaleBFMSim2Sim(CONFIG, headless=True, transports=transports)
 
 
-def command(sim, robot_index, *, enable, state_time_ns=123, offset=0.0):
+def command(
+    sim,
+    robot_index,
+    *,
+    enable,
+    state_time_ns=123,
+    offset=0.0,
+    phase="default_pose",
+    frame=-1,
+):
     binding = sim.bindings[robot_index]
     q = sim.data.qpos[binding.joint_qpos].copy()
     return SimCommand(
@@ -40,6 +89,8 @@ def command(sim, robot_index, *, enable, state_time_ns=123, offset=0.0):
         kd=np.full(29, 2.0),
         enable=enable,
         state_time_ns=state_time_ns,
+        phase=phase,
+        frame=frame,
     )
 
 
@@ -177,7 +228,8 @@ def test_roots_are_locked_only_during_default_pose_phase():
         np.testing.assert_allclose(
             sim.data.qpos[sim.box_qpos : sim.box_qpos + 7], initial_box
         )
-        sim._snapshot_id = sim.default_pose_steps
+        sim._snapshot_id = 10000
+        commands = tuple(replace(c, phase="loco_standing") for c in commands)
         sim.data.qvel[sim.bindings[0].root_dof + 2] = 1.0
         before = sim.data.qpos[sim.bindings[0].root_qpos + 2]
         sim.step_policy_interval(commands)
@@ -190,7 +242,8 @@ def test_roots_are_locked_only_during_default_pose_phase():
 def test_training_object_height_termination_stops_failed_rollout():
     sim = make_sim()
     try:
-        sim._snapshot_id = sim.default_pose_steps
+        sim._phase = "executing"
+        sim._policy_frame = sim.start_frame
         sim.data.qpos[sim.box_qpos + 2] += sim.object_position_z_error_m + 0.01
         mujoco.mj_forward(sim.model, sim.data)
         reason = sim.task_termination_reason()
@@ -210,10 +263,92 @@ def test_sim_pose_provider_converts_a_single_atomic_snapshot():
         snapshot = provider.get_snapshot()
         assert snapshot is not None
         assert 0.0 <= time.monotonic() - snapshot.robot_a.stamp_s < 0.1
-        np.testing.assert_allclose(
-            snapshot.object.half_extents, [0.30, 0.15, 0.15]
-        )
+        np.testing.assert_allclose(snapshot.object.half_extents, sim.box_half_extents)
         assert snapshot.robot_a.position_w[1] < snapshot.robot_b.position_w[1]
     finally:
         provider.stop()
+        sim.close()
+
+
+def test_startup_default_pose_and_zero_torque_do_not_drift():
+    sim = make_sim()
+    try:
+        defaults = load_default_command(ROOT / "config/g1/omnicontact")
+        for binding in sim.bindings:
+            np.testing.assert_allclose(
+                sim.data.qpos[binding.joint_qpos], defaults.target_pos
+            )
+        initial = sim.data.qpos.copy()
+        sim.data.qvel[:] = 0.2
+        for _ in range(10):
+            sim.step_policy_interval(
+                tuple(command(sim, i, enable=1, phase="zero_torque") for i in range(2))
+            )
+        np.testing.assert_array_equal(sim.data.qpos, initial)
+        assert sim.data.time == 0
+        assert sim.task_termination_reason() is None
+    finally:
+        sim.close()
+
+
+def test_asymmetric_release_is_rejected_before_physics():
+    sim = make_sim()
+    try:
+        with pytest.raises(RuntimeError, match="disagree"):
+            sim.step_policy_interval(
+                (
+                    command(sim, 0, enable=1, phase="loco_standing"),
+                    command(sim, 1, enable=1),
+                )
+            )
+        assert not sim._roots_released
+        assert sim.data.time == 0
+    finally:
+        sim.close()
+
+
+def test_waiting_ticks_do_not_advance_task_frame_or_termination():
+    sim = make_sim()
+    try:
+        sim._snapshot_id = 100000
+        sim.data.qpos[sim.box_qpos + 2] += 0.5
+        mujoco.mj_forward(sim.model, sim.data)
+        for phase in ("zero_torque", "default_pose", "loco_standing", "stopped"):
+            sim._phase = phase
+            assert sim.task_termination_reason() is None
+        sim._phase = "executing"
+        sim._policy_frame = 2
+        assert sim._reference_frame() == 2
+        assert sim.task_termination_reason() is not None
+        # The controller's aligned reference is authoritative.
+        sim._command_reference_position = tuple(sim.data.xpos[sim.box_body])
+        assert sim.task_termination_reason() is None
+    finally:
+        sim.close()
+
+
+def test_keyboard_snapshot_is_atomic_across_robots_and_retries():
+    sim = make_sim()
+    try:
+        sim.key_callback(ord("s"))
+        sim.publish_state_pair(10)
+        sim.key_callback(ord("b"))
+        sim.publish_state_pair(10)
+        for transport in sim.transports:
+            assert transport.states[-1]["buttons"] == transport.states[-2]["buttons"]
+            assert transport.states[-1]["buttons"]["start"]
+            assert not transport.states[-1]["buttons"]["B"]
+        sim._snapshot_id += 1
+        sim.publish_state_pair(20)
+        assert not any(sim.transports[0].states[-1]["buttons"].values())
+        sim._snapshot_id += 1
+        sim.publish_state_pair(30)
+        assert sim.transports[0].states[-1]["buttons"]["B"]
+        sim.key_callback(ord("a"))
+        sim.key_callback(ord("x"))
+        sim._snapshot_id += 1
+        sim.publish_state_pair(40)
+        assert sim.transports[0].states[-1]["buttons"]["stop"]
+        assert not sim.transports[0].states[-1]["buttons"]["A"]
+    finally:
         sim.close()

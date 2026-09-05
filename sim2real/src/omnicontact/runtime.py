@@ -314,6 +314,7 @@ class MotionBridgeClient:
         enable: int,
         state: BridgeState,
         visualization: ReferenceVisualization | None = None,
+        sim_control: dict[str, Any] | None = None,
     ) -> int:
         zeros = np.zeros(29, dtype=np.float32)
         extra_command = None
@@ -328,6 +329,8 @@ class MotionBridgeClient:
                     visualization
                 )
             extra_command = {"omnicontact_visualization": omni_visualization}
+        if sim_control is not None:
+            extra_command = dict(extra_command or {}, dual_sim_control=sim_control)
         self.publish_visualization(visualization)
         attempt_ns = time.monotonic_ns()
         self.last_command_gap_ms = getattr(self, "last_command_gap_ms", 0.0)

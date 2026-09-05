@@ -18,6 +18,9 @@ import yaml
 
 from dual_runtime.deployment_recorder import DualDeploymentRecorder
 from dual_runtime.policy_coordinator import DeploymentState, DualPolicyCoordinator
+from dual_runtime.sim_control import InteractiveDualCoordinator, load_default_command
+from dual_runtime.constants import POLICY_JOINT_NAMES
+from omnicontact.loco_mode import LocoModePolicy
 from dual_runtime.robot_session import RobotSession, RobotSessionConfig
 from dual_runtime.sim_pose_provider import DualSimulationPoseProvider
 from dual_runtime.scalebfm_residual_policy import DualScaleBFMResidualPolicy
@@ -208,19 +211,28 @@ def main() -> int:
         )
 
     default_pose_duration_s = float(raw.get("default_pose_duration_s", 2.0))
-    if args.pose_source == "sim":
-        default_pose_duration_s = float(
-            raw["simulation"].get(
-                "default_pose_duration_s", default_pose_duration_s
-            )
-        )
     default_ticks = round(default_pose_duration_s * control_hz)
     preflight = raw.get("preflight", {})
-    coordinator = DualPolicyCoordinator(
+    coordinator_type = DualPolicyCoordinator
+    interactive_options = {}
+    if args.pose_source == "sim":
+        standing_assets = resolve(
+            config_path.parent, raw["simulation"].get("standing_asset_dir", "omnicontact")
+        )
+        coordinator_type = InteractiveDualCoordinator
+        interactive_options = {
+            "loco_modes": tuple(
+                LocoModePolicy(standing_assets, list(POLICY_JOINT_NAMES))
+                for _ in range(2)
+            ),
+            "default_command": load_default_command(standing_assets),
+        }
+    coordinator = coordinator_type(
         session("a", session_values[0], observe_sim_pose=args.pose_source == "sim"),
         session("b", session_values[1]),
         provider,
         policy,
+        **interactive_options,
         enable_a=args.act_robot in {"a", "both"},
         enable_b=args.act_robot in {"b", "both"},
         state_timeout_s=float(raw.get("state_timeout_s", 0.2)),
@@ -330,7 +342,7 @@ def main() -> int:
                         "policy inference exceeded the real-time budget for "
                         f"{consecutive_slow_ticks} consecutive ticks"
                     )
-            if result.state == DeploymentState.COMPLETE:
+            if result.state in {DeploymentState.COMPLETE, DeploymentState.STOPPED}:
                 break
             next_tick += period
             delay = next_tick - time.monotonic()

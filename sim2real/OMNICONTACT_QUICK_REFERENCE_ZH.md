@@ -316,6 +316,31 @@ uv run src/deploy_omnicontact.py \
   --run-seconds 30
 ```
 
+### 5.1 双机器人 sim2sim
+
+双机使用独立入口，不能把上面的单机命令直接复制后仅替换配置。当前已采用相同的
+`ZERO TORQUE → s → DefaultPose → b → LocoMode standing → a → 搬箱 → LocoMode → x`
+交互顺序。两个 LocoMode 相互独立，只有两路同步命令到齐才释放 base。
+
+```bash
+cd /home/bcj/wyr/motion_tracking/sim2real
+bash scripts/run_dual_scalebfm_sim2sim.sh
+```
+
+无窗口：
+
+```bash
+bash scripts/run_dual_scalebfm_sim2sim.sh --headless
+```
+
+GUI 在 MuJoCo 窗口按键；headless 在启动终端逐次输入按键并回车。
+双机仿真使用 `56001/56002` 和 `56101/56102`；一键脚本自动选择 `--pose-source sim`
+及 `--act-robot both`。需先准备 `config/g1/dual_policy_artifacts`。
+
+双机关节从原版 DefaultPose 开始，任务布局仍来自双机 reference，尚不支持单机的
+`--initial-scene-source vive` 和 `--goal-position`。按 `a` 后执行已有双机 reference，
+不会根据 Vive JSON 的 goal 在线生成新任务。详见 [双机启动、按键和测试说明](DUAL_SCALEBFM_DEPLOY_ZH.md#8-双机器人-sim2sim与单机一致的按键控制)。
+
 ## 6. sim2real 实机孪生：标准三终端流程
 
 ### 6.1 终端 1：G1 bridge

@@ -30,7 +30,10 @@ while (($#)); do
   shift
 done
 
-uv run python src/dual_scalebfm_sim2sim.py "${sim_args[@]}" &
+# Background processes otherwise inherit /dev/null as stdin. Preserve terminal
+# input for headless s/b/a/x control; a pipeline can also provide scripted keys.
+exec 3<&0
+uv run python src/dual_scalebfm_sim2sim.py "${sim_args[@]}" <&3 &
 sim_pid=$!
 deploy_pid=""
 cleanup() {

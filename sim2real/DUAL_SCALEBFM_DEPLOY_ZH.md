@@ -234,62 +234,89 @@ bash scripts/run_dual_scalebfm_viewer.sh \
 显示 `!`。这是 viewer 告警，不代替 policy 中更严格的 `200 ms` bridge state 和 `100 ms`
 Tracker fail-closed 检查。
 
-## 8. 与实机控制链严格对齐的 sim2sim
+## 8. 双机器人 sim2sim：与单机一致的按键控制
 
-sim2sim 不运行另一份简化策略。它只用一个共享 MuJoCo 世界替换两台
-`g1_udp_bridge` 和三 Tracker Vive 输入；`deploy_dual_scalebfm_residual.py`、
-ScaleBFM、residual actor、限位、限速、力矩限制和双机 coordinator 与实机
-完全共用。仿真端口固定为 `127.0.0.1:56001/56002` 和
-`127.0.0.1:56101/56102`，不会向两个实机网口发送数据。
+双机 sim2sim 使用一个共享 MuJoCo 世界替换两台 bridge 和三 Tracker 输入，
+搬箱仍运行 `deploy_dual_scalebfm_residual.py` 的 ScaleBFM + residual。
+仿真使用独立的交互 coordinator；实机仍保留原来的 2 秒 reference 初始姿态过渡。
+仿真两路端口为 `127.0.0.1:56001/56002` 和 `127.0.0.1:56101/56102`。
 
-一条命令启动 GUI 仿真和正式部署进程：
+先完成第 1 节策略产物准备；`config/g1/dual_policy_artifacts` 中必须有 manifest、
+模型、metadata、reference 和 FK 资源。LocoMode 使用现有
+`config/g1/omnicontact/LocoMode.onnx`，A/B 各自维护独立的循环网络状态。
 
-```bash
-cd /home/yiranwang/TeleHuman/motion_tracking/sim2real
-bash scripts/run_dual_scalebfm_sim2sim.sh --duration 12
-```
-
-无窗口运行：
+一条命令启动 GUI 仿真和部署进程：
 
 ```bash
-bash scripts/run_dual_scalebfm_sim2sim.sh --headless --duration 12
+cd /home/bcj/wyr/motion_tracking/sim2real
+bash scripts/run_dual_scalebfm_sim2sim.sh
 ```
 
-也可分两个终端调试。先启动 MuJoCo bridge：
+操作顺序与单机一致，按键在 MuJoCo 窗口输入：
+
+1. 等待部署终端打印 `ZERO TORQUE`。两台机器人已在原版 DefaultPose，物理暂不推进。
+2. 按 `s`：持续保持原版 DefaultPose，两个 floating base 和箱子保持锁定。
+3. 确认姿态稳定后按 `b`：两路同一状态帧的 LocoMode 命令到齐，才同步释放 base 和箱子。
+4. 等待 `LocoMode standing` 并确认两台机器人稳定，按 `a`：使用新鲜双机位姿做
+   reference 对齐、几何预检，随后运行搬箱策略。两台头顶的红色圆柱消失。
+5. reference 完成后自动回到两台独立的 LocoMode standing，继续站立，等待 `x`。
+6. 按 `x`：对两台发送禁用阻尼命令并退出；一键脚本清理两个进程。终端 `Ctrl+C` 也可结束。
+
+提前按 `a` 或 `b` 不会跳过前置阶段；不再有自动进入搬箱的行为。完成后的 `a` 不会
+重放已执行完的 reference，需要重启场景。`--duration N` 可限制部署进程运行时间，
+这个墙钟时间包含等待按键阶段；人工操作建议不设置。
+
+分两个终端运行时，终端 1：
 
 ```bash
 bash scripts/run_dual_scalebfm_simulator.sh
 ```
 
-再启动正式 deploy，唯一变化是位姿和 bridge 选择为仿真：
+终端 2：
 
 ```bash
 bash scripts/run_dual_scalebfm_residual.sh \
   --pose-source sim \
   --act-robot both \
   --confirm-actuation ENABLE_MOTORS \
-  --no-visualization \
-  --duration 12
+  --no-visualization
 ```
 
-每个 50 Hz 状态帧带同一个 `state_receive_time_ns` 和原子
-`dual_sim_pose`。MuJoCo 必须收到 A/B 对应该时间戳的两条命令后，才执行
-4 个 200 Hz 物理步。`enable=0` 忽略位置目标并仅施加阻尼，`enable=1`
-才应用收到的 `q_des/qd_des/kp/kd`，随后按实机策略元数据裁剪力矩。
-与 OmniContact sim2sim 一样，仿真已经直接初始化到 `start_frame`，因此只在第一个
-20 ms 命令握手期间固定两个 floating root 和箱体；下一帧立即执行正式 ScaleBFM
-target。PD 力矩不是每 20 ms 保持一次旧值，而是在每个 200 Hz 物理子步用最新
-`q/dq` 重新计算。仿真使用训练 `current/g1.xml` 的完整碰撞几何和机身坐标系 IMU gyro。
+无窗口运行：
 
-验收时不能只看两个进程是否连通。终端每秒给出 reference frame、A/B pelvis 高度、
-箱体高度、箱体参考误差、最大关节误差/速度/力矩。箱体 Z 误差超过 `0.10 m` 或 XYZ
-误差超过 `0.30 m` 时，脚本按训练环境相同阈值立即以非零状态退出，不再让失败轨迹
-继续演化成倒地或飞散。
+```bash
+bash scripts/run_dual_scalebfm_sim2sim.sh --headless
+```
 
-当前 `best_agent.pt` 不是一条通过 12 秒动力学回归的策略。使用训练仓库原生
-`play_scalebfm_residual_object.py`、同一 reference、`start_frame=1` 和固定 `0.5 kg`
-箱体复测，也会在约第 102 个 policy step 因 `object.position_z` 终止并 reset。修复后的
-部署 sim2sim 能完成下蹲、接触并抬起箱子，但重复运行会在约 frame 69 到 161 触发同一
-物体高度失败条件。因此当前工具已经能正确暴露策略失败，不能把它作为该 checkpoint
-已通过动力学或可以直接实机执行的证据；应先更换/重新训练能在原生播放器中完整跑完
-reference 的 checkpoint，再用同一命令要求 sim2sim 零 termination 跑完全程。
+在启动命令的终端逐次输入 `s`、`b`、`a`、`x`，每次按回车；仍须在 `b` 后确认站立
+稳定才输入 `a`。分终端 headless 运行时，在仿真器终端输入按键。没有交互终端时可通过
+标准输入提供按键，EOF 不会自动使能或自动启动任务。
+
+每个 50 Hz 状态帧携带同一原子 pose 和按键快照。重传不会改变该帧的按键，两个机器人
+收到相同按钮值。两条 PD 命令都必须确认同一状态时间戳、控制阶段和 reference 帧；
+阶段不一致会终止仿真，不会让一台先释放 base。每个 200 Hz 物理子步重新计算 PD 力矩。
+箱子误差检查只在搬箱执行阶段进行，比较的是控制器实际发出的 reference 帧及对齐后
+的箱子位置；等待 `s/b/a` 和结束后的 LocoMode 不消耗任务帧，也不触发搬箱误差检查。
+
+初始化布局仍来自双机 reference bundle：A/B 的全局 XY、朝向及箱子位姿来自
+`start_frame`；机器人关节改用原版 `DefaultPose.yaml`，pelvis 高度默认 `0.793 m`，
+可通过 `simulation.initial_root_height_m` 调整。这与旧版直接加载 reference 关节角的
+训练 reset 不同。启动搬箱后仍需验证该 checkpoint 对站立切换到任务 reference 的适应性。
+当前没有 Vive 一次快照导入和 `--goal-position`；双机 JSON 中的 goal 不驱动此任务。
+
+`--act-robot none` 仍发送 `enable=0` 命令，释放 base 后仿真只施加阻尼，不能用于
+验证站立/搬箱效果。完全不连接 bridge 的数值检查应使用第 3 节离线 validator。
+
+测试交互流程、两路同步和仿真控制：
+
+```bash
+PYTHONPATH=src uv run --with pytest python -m pytest -q \
+  tests/test_dual_sim_control.py \
+  tests/test_dual_scalebfm_sim2sim.py \
+  tests/test_dual_scalebfm_deploy.py
+```
+
+仿真单元测试使用临时 reference 和真实 MuJoCo 场景，不依赖未提交的训练 checkpoint；
+测试通过不代表正式模型完成搬运。历史自动启动版本已记录默认 `best_agent.pt` 在箱子
+高度误差阈值上失败；该记录不能视为新交互流程的动力学验证。正式验收仍须补齐产物，
+按上述流程完成站立、搬箱和结束后站立的整段测试。

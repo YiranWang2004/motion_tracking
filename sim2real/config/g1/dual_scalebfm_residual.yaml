@@ -27,22 +27,18 @@ visualization:
   port: 55204
 
 # sim2sim replaces only the two C++/DDS bridges and Vive source. The deploy
-# entry, policy artifacts, coordinator, command limiters and safety path remain
-# exactly the same. Loopback-only ports make accidental robot actuation impossible.
+# entry, policy artifacts, command limiters and safety checks are shared.
+# Simulation uses an interactive s/b/a/x coordinator with independent LocoModes. Loopback-only ports make accidental robot actuation impossible.
 simulation:
   xml_path: "assets/dual_scalebfm_sim.xml"
   physical_frequency_hz: 200
-  # The simulator is initialized directly from start_frame, so it needs only
-  # one command handshake before policy execution. This matches OmniContact's
-  # sim_prepare_seconds instead of holding the initialized pose for 2 seconds.
-  default_pose_duration_s: 0.02
+  # Match the single-G1 interactive DefaultPose and independent LocoModes.
+  standing_asset_dir: "omnicontact"
+  initial_root_height_m: 0.793
   startup_timeout_s: 60.0
   lockstep_timeout_s: 1.0
   state_retry_s: 0.05
   disabled_damping_kd: 8.0
-  # Same startup semantics as the validated OmniContact sim2sim: keep both
-  # floating bases fixed only during the one-tick simulator handshake.
-  lock_roots_during_default_pose: true
   # Geometry of the default CFGen training bundle (motion_000000.npz).
   box_half_extents: [0.40829325, 0.15, 0.15]
   # Training task termination thresholds. Stop the rollout at the first failed
