@@ -19,7 +19,7 @@ task_safety:
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: ../../logs/dual_scalebfm_contact_v2_8192
-reference_alignment: none
+reference_alignment: motion_world
 start_frame: 1
 control_mode: 2
 future_step: 5

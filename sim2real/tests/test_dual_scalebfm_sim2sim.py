@@ -541,7 +541,7 @@ def test_reference_ghost_box_visibility_and_task_frame(only):
 def test_world_reference_ghost_does_not_follow_either_robot():
     sim = make_sim()
     try:
-        assert sim.raw['reference_alignment'] == 'none'
+        assert sim.raw['reference_alignment'] == 'motion_world'
         sim._update_reference_ghost()
         expected = sim._ghost_data.qpos.copy()
         for binding in sim.bindings:

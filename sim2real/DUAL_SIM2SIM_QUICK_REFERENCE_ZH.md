@@ -2,7 +2,7 @@
 
 > 2026-09-07 默认 reference 已替换为原地抬放动作的世界 Z 轴 −90°版本，双机沿 Y 排列；间距仍为 1.8 m。详见 [旋转与验证记录](DUAL_REFERENCE_ROTATION_ZH.md)。此前完整闭环数据属于旋转前动作。
 
-> 当前双机默认采用世界系参考：`reference_alignment: none`。实际 A、B、箱子分别与各自 reference 世界系位姿比较；虚影不随实际 A 平移或旋转。旧的 A 锚定描述仅适用于显式选择 `xyyaw` 的历史配置。位置门限暂沿用 `preflight.max_partner_position_error_m`，现在同时检查 A 和 B。实测标定世界系需与 motion 世界系一致；本次不自动重定位参考、不放宽门限。
+> 当前双机默认采用世界系参考：`reference_alignment: motion_world`（旧名称 `none` 仍兼容）。实际 A、B、箱子分别与各自 reference 世界系位姿比较；虚影不随实际 A 平移或旋转。旧的 A 锚定描述仅适用于显式选择 `xyyaw` 的历史配置。位置门限暂沿用 `preflight.max_partner_position_error_m`，现在同时检查 A 和 B。实测标定世界系需与 motion 世界系一致；不自动重定位参考、不放宽门限。
 
 > 2026-09-06：双机 B 阶段现统一使用 **ScaleBFM 跟踪静态 DefaultPose**，任务完成后也回到该阶段；正式入口不再加载走路策略 `LocoMode.onnx`。启动命令不变，sim2sim 与实机共用实现。机制与最新验证见 [ScaleBFM 站立说明](DUAL_SCALEBFM_STANDING_ZH.md)。
 
@@ -297,6 +297,20 @@ uv run --extra vive python scripts/view_dual_scalebfm_residual.py --help
   不等于实际站立或搬箱验证通过。
 
 ## 12. 双机器人：用箱子标定公共世界系
+
+双机配置使用 `reference_alignment: motion_world`（兼容旧名称 `none`）。
+标定和任务摆放是两个独立阶段：
+
+1. 按下述命令标定一次固定世界系，保存 `world_from_steamvr` 和 Tracker→箱子安装外参。
+2. 标定完成后保持外参不变，将实物箱子和两台机器人摆到 NPZ 的 `start_frame` 位姿。
+   当前 −90°参考要求箱子中心 `(0, 0, 0.15)` m、yaw `−90°`；
+   箱子 +X 指向世界 −Y，箱子 +Y 指向世界 +X。
+3. 启动任务时读取 NPZ 的参考位姿，并与 Vive 实测位姿做启动预检。
+   位姿不匹配时应调整实物摆放，不能用参考值覆盖实测值。
+
+标定命令中 yaw=0° 的摆放只用于定义世界系，之后允许移动箱子。
+不要在任务摆放后再次运行同一标定命令，否则新的箱子朝向又会被定义为世界 yaw=0°。
+任务启动不会修改标定 JSON、不会自动平移/旋转参考；启动日志打印参考箱子的位置和 WXYZ 四元数。
 
 对应单机速查文档的“箱子上表面中心单点快速标定”。双机直接复用
 `calibrate_vive_box_world.py`，输入和输出改为 **`config/g1/omnicontact_vive_dual.json`**。

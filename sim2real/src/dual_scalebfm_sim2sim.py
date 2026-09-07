@@ -746,7 +746,7 @@ class DualScaleBFMSim2Sim:
                 self._viewer.sync()
 
     def _reference_preview_alignment(self):
-        if self.raw.get("reference_alignment", "none") == "none":
+        if self.raw.get("reference_alignment", "none") in ("none", "motion_world"):
             return np.array([1., 0., 0., 0.]), np.zeros(3)
         binding = self.bindings[0]
         actual = self.data.qpos[binding.root_qpos:binding.root_qpos + 7]

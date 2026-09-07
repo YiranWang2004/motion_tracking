@@ -151,11 +151,11 @@ class DualReferenceBundle:
 
         if self._aligned:
             raise RuntimeError("reference alignment can only be applied once")
-        if mode == "none":
+        if mode in ("none", "motion_world"):
             self._aligned = True
             return
         if mode != "xyyaw":
-            raise ValueError("reference_alignment must be 'none' or 'xyyaw'")
+            raise ValueError("reference_alignment must be 'motion_world', 'none' (legacy), or 'xyyaw'")
         pelvis_index = self.body_order.index("pelvis")
         reference_position = self.body_pos_w[0, 0, pelvis_index]
         reference_quat = self.body_quat_wxyz[0, 0, pelvis_index]

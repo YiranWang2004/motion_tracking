@@ -160,6 +160,13 @@ def main() -> int:
         reference_alignment=str(raw.get("reference_alignment", "none")),
         torch_num_threads=int(raw.get("torch_num_threads", 4)),
     )
+    initial_reference, _ = policy.reference.frame(policy.start_frame)
+    print(
+        f"[reference] placement={policy.reference_alignment}, frame={policy.start_frame}; "
+        f"box position_w={initial_reference.object_pos_w.tolist()}, "
+        f"quaternion_wxyz={initial_reference.object_quat_wxyz.tolist()}; "
+        "Vive calibration and measured poses remain in the calibrated world."
+    )
     limits_path = resolve(config_path.parent, raw["joint_limits_source"])
     limits = load_yaml(limits_path)
     lower = np.asarray(limits["joint_pos_lowerlimit_lab"], dtype=np.float32)
