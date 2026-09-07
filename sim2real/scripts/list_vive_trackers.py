@@ -27,46 +27,51 @@ def main() -> int:
         for serial, index in sorted(devices.items()):
             print(f"  serial={serial}  openvr_index={index}")
         valid_counts = {serial: 0 for serial in devices}
-        missing_frames = {serial: [] for serial in devices}
-        consecutive_missing = {serial: 0 for serial in devices}
-        longest_missing = {serial: 0 for serial in devices}
+        missing_intervals = {serial: [] for serial in devices}
+        missing_since = {serial: None for serial in devices}
         attempts = 0
         start = time.monotonic()
         end = start + args.seconds
-        print("Frame numbers are 1-based read attempts, not SteamVR frame IDs.", flush=True)
-        while time.monotonic() < end:
-            samples = reader.read_all()
-            attempts += 1
-            elapsed = time.monotonic() - start
-            missing = []
-            for serial in devices:
-                if samples.get(serial) is not None:
-                    valid_counts[serial] += 1
-                    consecutive_missing[serial] = 0
-                else:
-                    missing_frames[serial].append(attempts)
-                    consecutive_missing[serial] += 1
-                    longest_missing[serial] = max(
-                        longest_missing[serial], consecutive_missing[serial]
-                    )
-                    missing.append(serial)
-            if missing:
-                print(
-                    f"  MISSING frame={attempts} t={elapsed:.3f}s "
-                    f"trackers={', '.join(sorted(missing))}",
-                    flush=True,
-                )
-            time.sleep(0.01)
+        print(f"Checking poses for {args.seconds:g}s...", flush=True)
+        try:
+            while time.monotonic() < end:
+                samples = reader.read_all()
+                attempts += 1
+                elapsed = time.monotonic() - start
+                for serial in devices:
+                    if samples.get(serial) is not None:
+                        valid_counts[serial] += 1
+                        if missing_since[serial] is not None:
+                            missing_intervals[serial].append(
+                                (missing_since[serial], elapsed)
+                            )
+                            missing_since[serial] = None
+                    elif missing_since[serial] is None:
+                        missing_since[serial] = elapsed
+                time.sleep(0.01)
+        except KeyboardInterrupt:
+            print("\nInterrupted; summarizing collected reads.")
+        elapsed = time.monotonic() - start
         print(f"Pose health over {attempts} reads:")
         for serial in sorted(devices):
             rate = 100.0 * valid_counts[serial] / attempts if attempts else 0.0
             print(
                 f"  {serial}: valid={valid_counts[serial]}/{attempts} "
-                f"({rate:.2f}%) missing={len(missing_frames[serial])} "
-                f"longest_missing_run={longest_missing[serial]} reads"
+                f"({rate:.2f}%) missing={attempts - valid_counts[serial]}"
             )
-            frames = ", ".join(str(frame) for frame in missing_frames[serial])
-            print(f"    missing_frames: [{frames}]")
+            for interval_start, interval_end in missing_intervals[serial]:
+                print(
+                    f"    MISSING {interval_start:.3f}s - {interval_end:.3f}s "
+                    f"duration={interval_end - interval_start:.3f}s"
+                )
+            if missing_since[serial] is not None:
+                print(
+                    f"    MISSING {missing_since[serial]:.3f}s - {elapsed:.3f}s "
+                    f"duration={elapsed - missing_since[serial]:.3f}s "
+                    "(still missing at end)"
+                )
+            elif not missing_intervals[serial]:
+                print("    No missing intervals.")
     finally:
         reader.stop()
     return 0
