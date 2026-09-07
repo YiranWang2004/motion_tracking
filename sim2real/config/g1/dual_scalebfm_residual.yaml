@@ -11,7 +11,7 @@ control:
   require_button_release: true
   phase_target_delta:
     default_pose: 0.02
-    loco_standing: 1.0
+    scalebfm_standing: 1.0
     executing: 1.0
 task_safety:
   object_position_z_error_m: 0.1
@@ -19,7 +19,7 @@ task_safety:
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: "../../logs/dual_scalebfm_residual"
-reference_alignment: "xyyaw"
+reference_alignment: "none"
 start_frame: 1
 control_mode: 7
 future_step: 5

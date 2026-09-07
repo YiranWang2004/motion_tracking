@@ -1,4 +1,4 @@
-"""End-to-end dual ScaleBFM base plus MAPPO residual policy."""
+"""Dual ScaleBFM tracking with an optional MAPPO residual policy."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class DualScaleBFMResidualPolicy:
         scalebfm_checkpoint: str | Path,
         scalebfm_metadata: str | Path,
         scalebfm_mode_table: str | Path,
-        residual_checkpoint: str | Path,
+        residual_checkpoint: str | Path | None = None,
         reference_bundle: str | Path,
         kinematics_xml: str | Path,
         device: str = "cpu",
@@ -55,8 +55,9 @@ class DualScaleBFMResidualPolicy:
         future_step: int = 5,
         residual_scale: float = 0.10,
         start_frame: int = 1,
-        reference_alignment: str = "xyyaw",
+        reference_alignment: str = "none",
         torch_num_threads: int | None = None,
+        residual_enabled: bool = True,
     ) -> None:
         if not 5 <= int(future_step) <= 33:
             raise ValueError("future_step must be in [5, 33]")
@@ -70,7 +71,13 @@ class DualScaleBFMResidualPolicy:
             inference_precision=inference_precision,
             torch_num_threads=torch_num_threads,
         )
-        self.residual = ResidualPolicy(residual_checkpoint, device=device)
+        self.residual_enabled = bool(residual_enabled)
+        if self.residual_enabled and residual_checkpoint is None:
+            raise ValueError("residual_checkpoint is required when residual is enabled")
+        self.residual = (
+            ResidualPolicy(residual_checkpoint, device=device)
+            if self.residual_enabled else None
+        )
         self.reference = DualReferenceBundle(reference_bundle)
         self.kinematics = (
             G1PolicyKinematics(kinematics_xml),
@@ -130,6 +137,7 @@ class DualScaleBFMResidualPolicy:
             raise RuntimeError("dual policy is already initialized")
         self.reference.align_to_robot_a(snapshot.robot_a, mode=self.reference_alignment)
         reference_a, reference_b = self.reference.frame(self.start_frame)
+        robot_a_error = float(np.linalg.norm(snapshot.robot_a.position_w - reference_a.body_pos_w[0]))
         partner_error = float(
             np.linalg.norm(snapshot.robot_b.position_w - reference_b.body_pos_w[0])
         )
@@ -152,15 +160,21 @@ class DualScaleBFMResidualPolicy:
         object_orientation_error = _quaternion_error_rad(
             snapshot.object.quaternion_xyzw, reference_a.object_quat_wxyz
         )
+        if robot_a_error > max_partner_position_error_m:
+            raise RuntimeError(
+                f"robot A initial position differs from world reference by {robot_a_error:.3f} m; "
+                f"actual_w={snapshot.robot_a.position_w.tolist()}, reference_w={reference_a.body_pos_w[0].tolist()}"
+            )
         if partner_error > max_partner_position_error_m:
             raise RuntimeError(
-                f"robot B initial position differs from reference by {partner_error:.3f} m"
+                f"robot B initial position differs from world reference by {partner_error:.3f} m; "
+                f"actual_w={snapshot.robot_b.position_w.tolist()}, reference_w={reference_b.body_pos_w[0].tolist()}"
             )
-        if object_error > max_object_position_error_m:
+        if self.residual_enabled and object_error > max_object_position_error_m:
             raise RuntimeError(
                 f"object initial position differs from reference by {object_error:.3f} m"
             )
-        if box_size_error > max_box_size_error_m:
+        if self.residual_enabled and box_size_error > max_box_size_error_m:
             raise RuntimeError(
                 f"box half extents differ from reference by {box_size_error:.3f} m"
             )
@@ -169,13 +183,15 @@ class DualScaleBFMResidualPolicy:
                 "robot initial orientation differs from reference by "
                 f"{robot_orientation_error:.3f} rad"
             )
-        if object_orientation_error > max_object_orientation_error_rad:
+        if self.residual_enabled and object_orientation_error > max_object_orientation_error_rad:
             raise RuntimeError(
                 "object initial orientation differs from reference by "
                 f"{object_orientation_error:.3f} rad"
             )
         self.initialized = True
         return {
+            "robot_a_position_error_m": robot_a_error,
+            "robot_b_position_error_m": partner_error,
             "partner_position_error_m": partner_error,
             "object_position_error_m": object_error,
             "box_size_error_m": box_size_error,
@@ -231,30 +247,39 @@ class DualScaleBFMResidualPolicy:
             control_mode=self.control_mode,
             time_offsets=self.time_offsets,
         )
-        references: tuple[ReferenceFrame, ReferenceFrame] = self.reference.frame(
-            self.frame
-        )
-        observations = np.stack(
-            [
-                build_residual_observation(
-                    state=states[index],
-                    reference=references[index],
-                    live=live[index],
-                    partner_live=live[1 - index],
-                    object_pose=snapshot.object,
-                    scalebfm_target=scalebfm_target[index],
-                    previous_residual=self.previous_residual[index],
-                    default_q=self.scalebfm.default_q,
-                )
-                for index in range(2)
-            ]
-        )
-        residuals = self.residual.infer(observations)
-        targets = scalebfm_target + self.residual_scale * residuals
-        self.previous_residual = residuals.copy()
-        self.previous_executed_action = raw_action + (
-            self.residual_scale * residuals / self.scalebfm.action_scale[None]
-        )
+        if self.residual_enabled:
+            references: tuple[ReferenceFrame, ReferenceFrame] = self.reference.frame(
+                self.frame
+            )
+            observations = np.stack(
+                [
+                    build_residual_observation(
+                        state=states[index],
+                        reference=references[index],
+                        live=live[index],
+                        partner_live=live[1 - index],
+                        object_pose=snapshot.object,
+                        scalebfm_target=scalebfm_target[index],
+                        previous_residual=self.previous_residual[index],
+                        default_q=self.scalebfm.default_q,
+                    )
+                    for index in range(2)
+                ]
+            )
+            residuals = self.residual.infer(observations)
+            targets = scalebfm_target + self.residual_scale * residuals
+            self.previous_residual = residuals.copy()
+            self.previous_executed_action = raw_action + (
+                self.residual_scale * residuals / self.scalebfm.action_scale[None]
+            )
+        else:
+            # A true base-policy baseline: no residual checkpoint, preprocessing,
+            # actor inference or residual contribution to the action history.
+            observations = np.zeros((2, 201), dtype=np.float32)
+            residuals = np.zeros((2, 29), dtype=np.float32)
+            targets = scalebfm_target.copy()
+            self.previous_residual.fill(0.0)
+            self.previous_executed_action = raw_action.copy()
         if not np.all(np.isfinite(targets)):
             raise RuntimeError("combined dual policy target is non-finite")
         emitted_frame = self.frame

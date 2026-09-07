@@ -1,6 +1,7 @@
 control_frequency_hz: 50
 state_timeout_s: 0.2
-pose_timeout_s: 0.1
+# Maximum age of the last complete valid Vive snapshot, including dropouts.
+pose_timeout_s: 0.30
 max_state_skew_s: 0.05
 default_pose_duration_s: 2.0
 control:
@@ -10,7 +11,7 @@ control:
   require_button_release: true
   phase_target_delta:
     default_pose: 0.02
-    loco_standing: 1.0
+    scalebfm_standing: 1.0
     executing: 1.0
 task_safety:
   object_position_z_error_m: 0.1
@@ -18,7 +19,7 @@ task_safety:
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: ../../logs/dual_scalebfm_contact_v2_8192
-reference_alignment: xyyaw
+reference_alignment: none
 start_frame: 1
 control_mode: 2
 future_step: 5

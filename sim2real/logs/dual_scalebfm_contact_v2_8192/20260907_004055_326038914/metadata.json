@@ -1,0 +1,152 @@
+{
+  "config": "/home/bcj/wyr/motion_tracking/sim2real/config/g1/dual_scalebfm_contact_v2_8192.yaml",
+  "effective_control": {
+    "standing_asset_dir": "omnicontact",
+    "default_pose_duration_s": 2.0,
+    "damping_kd": 8.0,
+    "max_tilt_rad": 0.7,
+    "require_button_release": true,
+    "phase_target_delta": {
+      "default_pose": 0.02,
+      "scalebfm_standing": 1.0,
+      "executing": 1.0,
+      "loco_standing": 1.0
+    },
+    "task_safety": {
+      "object_position_z_error_m": 0.1,
+      "object_position_xyz_error_m": 0.3
+    }
+  },
+  "configuration": {
+    "control_frequency_hz": 50,
+    "state_timeout_s": 0.2,
+    "pose_timeout_s": 0.1,
+    "max_state_skew_s": 0.05,
+    "default_pose_duration_s": 2.0,
+    "control": {
+      "standing_asset_dir": "omnicontact",
+      "damping_kd": 8.0,
+      "max_tilt_rad": 0.7,
+      "require_button_release": true,
+      "phase_target_delta": {
+        "default_pose": 0.02,
+        "scalebfm_standing": 1.0,
+        "executing": 1.0
+      }
+    },
+    "task_safety": {
+      "object_position_z_error_m": 0.1,
+      "object_position_xyz_error_m": 0.3
+    },
+    "max_inference_time_s": 0.018,
+    "max_consecutive_slow_ticks": 3,
+    "log_directory": "../../logs/dual_scalebfm_contact_v2_8192",
+    "reference_alignment": "none",
+    "start_frame": 1,
+    "control_mode": 2,
+    "future_step": 5,
+    "residual_scale": 0.1,
+    "device": "cpu",
+    "inference_precision": "fp32",
+    "torch_num_threads": 4,
+    "cpu_affinity": [],
+    "visualization": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 55204
+    },
+    "simulation": {
+      "xml_path": "assets/dual_scalebfm_sim.xml",
+      "joint_dynamics_xml": "assets/g1_29dof.xml",
+      "physical_frequency_hz": 200,
+      "initial_root_height_m": 0.793,
+      "startup_timeout_s": 60.0,
+      "lockstep_timeout_s": 1.0,
+      "state_retry_s": 0.05,
+      "box_half_extents": [
+        0.5,
+        0.15,
+        0.15
+      ],
+      "robots": {
+        "robot_a": {
+          "udp": {
+            "state_bind_host": "127.0.0.1",
+            "state_port": 56001,
+            "cmd_host": "127.0.0.1",
+            "cmd_port": 56002
+          }
+        },
+        "robot_b": {
+          "udp": {
+            "state_bind_host": "127.0.0.1",
+            "state_port": 56101,
+            "cmd_host": "127.0.0.1",
+            "cmd_port": 56102
+          }
+        }
+      }
+    },
+    "preflight": {
+      "max_partner_position_error_m": 0.8,
+      "max_object_position_error_m": 0.2,
+      "max_box_size_error_m": 0.03,
+      "max_robot_orientation_error_rad": 0.35,
+      "max_object_orientation_error_rad": 0.35
+    },
+    "artifacts": {
+      "directory": "dual_policy_artifacts_contact_v2_8192",
+      "manifest": "manifest.json",
+      "scalebfm_checkpoint": "scalebfm_model.pt",
+      "scalebfm_metadata": "scalebfm_metadata.json",
+      "scalebfm_mode_table": "scalebfm_mode_table.pt",
+      "residual_checkpoint": "residual_actor.pt",
+      "reference_bundle": "reference_bundle.npz",
+      "kinematics_xml": "g1_29dof_scalebfm.xml"
+    },
+    "joint_limits_source": "omnicontact/OmniContact.yaml",
+    "robot_a": {
+      "udp": {
+        "state_bind_host": "10.201.1.1",
+        "state_port": 55001,
+        "cmd_host": "10.201.1.2",
+        "cmd_port": 55002
+      }
+    },
+    "robot_b": {
+      "udp": {
+        "state_bind_host": "10.201.2.1",
+        "state_port": 55101,
+        "cmd_host": "10.201.2.2",
+        "cmd_port": 55102
+      }
+    },
+    "vive_config": "omnicontact_vive_dual.json",
+    "artifact_validation_notes": {
+      "checkpoint": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt",
+      "status": "simulation_candidate_training_settings_not_fully_confirmed",
+      "control_mode_evidence": "Inferred from checkpoint directory name and repository collision training scripts; TensorBoard has no hyperparameter records.",
+      "residual_scale_evidence": "0.10 is the repository deployment/training default; original run command unavailable.",
+      "reference": "cfgen_box1m_lift_drop.npz, 430 frames, half extents [0.5, 0.15, 0.15]"
+    }
+  },
+  "reference": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_box1m_lift_drop_yaw_minus90.npz",
+  "reference_alignment": "none",
+  "start_frame": 1,
+  "pose_source": "vive",
+  "standing_policy": "scalebfm_default_pose",
+  "object_enabled": false,
+  "policy_mode": "scalebfm_only",
+  "vive_config": "/home/bcj/wyr/motion_tracking/sim2real/config/g1/omnicontact_vive_dual.json",
+  "device": "cpu",
+  "act_robot": "both",
+  "control_frequency_hz": 50.0,
+  "last_result": {
+    "ok": false,
+    "state": "fault",
+    "reason": "stale_vive_snapshot"
+  },
+  "exit_reason": "RuntimeError: stale_vive_snapshot",
+  "ticks": 11,
+  "saved_at_unix_s": 1788712855.5819347
+}

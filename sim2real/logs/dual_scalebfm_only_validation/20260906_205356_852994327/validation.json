@@ -1,0 +1,15 @@
+{
+  "policy_mode": "scalebfm_only",
+  "reference": "motion_000029.npz",
+  "last_task_frame": 69,
+  "task_ticks": 69,
+  "residual_max": 0.0,
+  "processing_p95_ms": 7.031581408227789,
+  "final_state": "fault",
+  "reason": "RuntimeError: object.position_z frame=69 error=0.106m",
+  "final_enable": [
+    0,
+    0
+  ],
+  "full_motion_completed": false
+}

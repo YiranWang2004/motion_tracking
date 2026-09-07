@@ -66,9 +66,9 @@
       "source": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/contact_v2_ctrl_2_8192/checkpoints/best_agent.pt"
     },
     "reference_bundle.npz": {
-      "sha256": "eac65af4a72e34633005b2ed2ba7de408a42ffc86cf8ab6ee1ece9ab3d52a154",
-      "bytes": 1101717,
-      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_batch_128/motion_000029.npz"
+      "sha256": "10e4322667bdfb0410bc5a039574b06ba90cbbe5fdad5725504ed69ba82ace8a",
+      "bytes": 1000348,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_box1m_lift_drop_yaw_minus90.npz"
     },
     "g1_29dof_scalebfm.xml": {
       "sha256": "2a8bace5933546b3e640793ec12de03db977c3d44dcbd20bc7ae3072803f0f2d",

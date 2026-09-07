@@ -12,8 +12,8 @@
   </visual>
 
   <asset>
-    <!-- Task-specific conversion of the exact training current/g1.xml:
-         identical collisions plus reflected armatures and torque motors. -->
+    <!-- Dual_G1_MJ omnicontact-hand collisions (16 meshes per hand),
+         with deployment reflected armatures and torque motors. -->
     <model name="robot_a_model" file="g1_scalebfm_training.xml"/>
     <model name="robot_b_model" file="g1_scalebfm_training.xml"/>
     <texture type="skybox" builtin="flat" rgb1="0.025 0.035 0.045"

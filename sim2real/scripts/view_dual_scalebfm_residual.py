@@ -37,6 +37,25 @@ from omnicontact.replay import ReplayClock  # noqa: E402
 from omnicontact.viewer_style import configure_camera  # noqa: E402
 
 
+DEFAULT_BOX_HALF_EXTENTS = np.array([0.15, 0.5, 0.15], dtype=np.float64)
+
+
+def reference_box_half_extents(path: str | None) -> np.ndarray:
+    """Only explicit bundle dimensions override the one-metre display default."""
+    if path is None:
+        return DEFAULT_BOX_HALF_EXTENTS.copy()
+    with np.load(Path(path).expanduser(), allow_pickle=False) as bundle:
+        if "training_box_half_extents" in bundle:
+            value = np.asarray(bundle["training_box_half_extents"], dtype=np.float64)
+        elif "box_size" in bundle:
+            value = np.asarray(bundle["box_size"], dtype=np.float64) / 2.0
+        else:
+            return DEFAULT_BOX_HALF_EXTENTS.copy()
+    if value.shape != (3,) or not np.all(np.isfinite(value)) or np.any(value <= 0):
+        raise ValueError("bundle box dimensions must be a finite positive 3-vector")
+    return value
+
+
 @dataclass(frozen=True)
 class TwinBindings:
     actual_base_qpos: np.ndarray
@@ -310,7 +329,6 @@ def apply_vive_samples(
             )
         else:
             _set_freejoint(data, bindings.actual_box_qpos, calibrated_pose)
-    model.geom_size[bindings.actual_box_geom, :3] = config.object_half_extents_m
     return fresh
 
 
@@ -323,6 +341,7 @@ def apply_visualization(
     ghost_mode: str = "reference",
     apply_actual: bool = True,
     apply_tracker_markers: bool = True,
+    box_half_extents: np.ndarray | None = None,
 ) -> None:
     if ghost_mode not in {"reference", "target"}:
         raise ValueError("ghost_mode must be 'reference' or 'target'")
@@ -365,9 +384,12 @@ def apply_visualization(
         _set_mocap(
             data, int(bindings.tracker_mocap[2]), actual["object_wxyz"]
         )
-    if apply_actual:
-        model.geom_size[bindings.actual_box_geom, :3] = actual["box_half_extents"]
-    model.geom_size[bindings.reference_box_geom, :3] = reference["box_half_extents"]
+    # The reference packet carries the active CFGen bundle dimensions. Vive
+    # config/actual packet dimensions must not replace the display default.
+    extents = (reference.get("box_half_extents", DEFAULT_BOX_HALF_EXTENTS)
+               if box_half_extents is None else box_half_extents)
+    model.geom_size[bindings.actual_box_geom, :3] = extents
+    model.geom_size[bindings.reference_box_geom, :3] = extents
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -437,6 +459,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     model, data, bindings = load_twin(args.xml_path)
+    initial_extents = reference_box_half_extents(args.reference_bundle)
+    explicit_extents = initial_extents if args.reference_bundle is not None else None
+    model.geom_size[bindings.actual_box_geom, :3] = initial_extents
+    model.geom_size[bindings.reference_box_geom, :3] = initial_extents
     initialize_default_pose(
         data, bindings, _load_default_pose(args.default_pose_config)
     )
@@ -591,6 +617,7 @@ def main(argv: list[str] | None = None) -> int:
                                 bindings,
                                 packet,
                                 ghost_mode=ghost_mode[0],
+                                box_half_extents=explicit_extents,
                             )
                             for robot_index in range(2):
                                 apply_bridge_joint_state(
@@ -638,6 +665,7 @@ def main(argv: list[str] | None = None) -> int:
                                 bindings,
                                 visual.data,
                                 ghost_mode=ghost_mode[0],
+                                box_half_extents=explicit_extents,
                                 apply_actual=vive_reader is None,
                                 apply_tracker_markers=vive_reader is None,
                             )

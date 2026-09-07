@@ -161,3 +161,103 @@ def test_a_preserves_previous_command_as_limiter_anchor(runtime):
     for client, target, anchor in zip(clients, result.policy_step.targets, previous):
         np.testing.assert_allclose(client.sent[-1][0].target_pos,
                                    np.clip(target, anchor - .02, anchor + .02))
+
+@pytest.mark.parametrize("backend", ["sim", "hardware"])
+def test_startup_waits_without_commands_then_runtime_loss_is_fatal(runtime, backend):
+    coordinator, clients, _, _ = runtime
+    coordinator.input_mode = backend
+    coordinator.startup_timeout_s = 60
+    original = clients[0].read_next
+    clients[0].read_next = lambda timeout: None
+    for _ in range(3):
+        result = tick(runtime)
+        assert result.ok and result.reason == 'waiting_for_initial_inputs'
+        assert all(not client.sent for client in clients)
+    clients[0].read_next = original
+    assert tick(runtime).reason == 'zero_torque_wait_s'
+    clients[0].read_next = lambda timeout: None
+    result = tick(runtime)
+    assert not result.ok and result.reason == 'missing_bridge_state'
+    assert all(client.sent[-1][1]['enable'] == 0 for client in clients)
+
+
+def test_startup_timeout_is_bounded(runtime):
+    import time
+    coordinator, clients, _, _ = runtime
+    coordinator.startup_timeout_s = 60
+    coordinator._startup_deadline = time.monotonic()-1
+    clients[0].read_next = lambda timeout: None
+    result = tick(runtime)
+    assert not result.ok
+    assert result.reason == 'startup_timeout: missing_bridge_state'
+
+@pytest.mark.parametrize('backend',['sim','hardware'])
+def test_scalebfm_only_skips_object_termination(runtime, backend):
+    coordinator, clients, policy, _ = runtime
+    coordinator.input_mode = backend
+    policy.residual_enabled = False
+    coordinator.task_safety = shared_control_settings({})['task_safety']
+    tick(runtime,'start')
+    tick(runtime,'B')
+    assert tick(runtime,'A').state == S.EXECUTING
+    assert tick(runtime).state == S.EXECUTING
+
+
+@pytest.mark.parametrize('backend', ['sim', 'hardware'])
+def test_default_pose_ready_after_exactly_100_valid_ticks(runtime, backend, capsys):
+    coordinator, _, _, _ = runtime
+    coordinator.input_mode = backend
+    coordinator.transition_ticks = 100
+    tick(runtime)
+    tick(runtime, 'start')
+    for _ in range(98):
+        tick(runtime)
+    assert coordinator._transition_elapsed == 99
+    assert 'DefaultPose ready:' not in capsys.readouterr().out
+    tick(runtime)
+    assert coordinator._transition_elapsed == 100
+    assert 'DefaultPose ready:' in capsys.readouterr().out
+
+
+def test_initial_held_start_explains_repress(runtime, capsys):
+    coordinator, _, _, _ = runtime
+    coordinator._buttons_initialized = False
+    assert tick(runtime, 'start').state == S.ZERO_TORQUE
+    assert 'Startup button ignored' in capsys.readouterr().out
+    tick(runtime)
+    assert tick(runtime, 'start').state == S.DEFAULT_POSE
+
+
+@pytest.mark.parametrize('backend', ['sim', 'hardware'])
+def test_same_sim_snapshot_with_delayed_arrival_only_bypasses_hardware_skew(runtime, backend):
+    import time
+    from dataclasses import replace
+    coordinator, clients, _, _ = runtime
+    coordinator.input_mode = backend
+    coordinator.max_state_skew_s = .05
+    coordinator.state_timeout_s = .2
+    clients[0].stamp = clients[1].stamp = 12345
+    read = clients[0].read_next
+    clients[0].read_next = lambda timeout: replace(
+        read(timeout), packet_arrival_ns=time.monotonic_ns() - 80_000_000)
+    result = tick(runtime)
+    if backend == 'sim':
+        assert result.ok and result.reason == 'zero_torque_wait_s'
+        # The next matched snapshot must accept S, despite the same arrival skew.
+        clients[0].stamp = clients[1].stamp = 12346
+        assert tick(runtime, 'start').state == S.DEFAULT_POSE
+    else:
+        assert not result.ok and result.reason == 'skewed_bridge_state'
+
+
+def test_matched_sim_snapshot_still_rejects_stale_packets(runtime):
+    import time
+    from dataclasses import replace
+    coordinator, clients, _, _ = runtime
+    coordinator.state_timeout_s = .2
+    clients[0].stamp = clients[1].stamp = 12345
+    read = clients[0].read_next
+    clients[0].read_next = lambda timeout: replace(
+        read(timeout), packet_arrival_ns=time.monotonic_ns() - 300_000_000)
+    result = tick(runtime)
+    assert not result.ok and result.reason == 'stale_bridge_state'

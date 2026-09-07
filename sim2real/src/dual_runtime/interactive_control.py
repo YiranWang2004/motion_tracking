@@ -28,18 +28,25 @@ def load_default_command(asset_dir: Path) -> PDCommand:
 
 
 class InteractiveDualCoordinator(DualPolicyCoordinator):
-    """s: DefaultPose, b: independent LocoModes, a: coupled policy, x: stop.
+    """s: DefaultPose, b: standing reference tracking, a: task, x: stop.
 
     In simulation, phase metadata travels with both PD commands. No simulator key
     may release a root before both policies have produced the matching command.
     """
 
-    def __init__(self, *args, loco_modes, default_command, input_mode="sim",
+    def __init__(self, *args, default_command, loco_modes=None, standing_policy=None, input_mode="sim",
                  transition_ticks=0, phase_target_delta=None, require_button_release=False,
-                 max_tilt_rad=None, task_safety=None, **kwargs):
+                 max_tilt_rad=None, task_safety=None, startup_timeout_s=0.0, **kwargs):
         super().__init__(*args, **kwargs)
         if input_mode not in {"sim", "hardware"}:
             raise ValueError("input_mode must be sim or hardware")
+        self.startup_timeout_s = float(startup_timeout_s)
+        if not np.isfinite(self.startup_timeout_s) or self.startup_timeout_s < 0:
+            raise ValueError("startup_timeout_s must be finite and non-negative")
+        self._startup_deadline = None
+        self._next_startup_report = 0.0
+        self._input_status = ""
+        self._inputs_ready = False
         self.input_mode = input_mode
         self.transition_ticks = int(transition_ticks)
         if self.transition_ticks < 0:
@@ -54,6 +61,12 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
         self._transition_start = None
         self._transition_elapsed = 0
         self.loco_modes = loco_modes
+        self.standing_policy = standing_policy
+        if standing_policy is None and loco_modes is None:
+            raise ValueError("a standing controller is required")
+        self.standing_state = (DeploymentState.SCALEBFM_STANDING if standing_policy is not None
+                               else DeploymentState.LOCO_STANDING)
+        self.standing_label = "ScaleBFM DefaultPose standing" if standing_policy is not None else "LocoMode standing"
         self.default_command = default_command
         self.state = DeploymentState.ZERO_TORQUE
         self._previous_buttons = {}
@@ -63,15 +76,29 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
         self._last_reference_position = None
         self._last_reference_frame = -1
         print(
-            "ZERO TORQUE: Start/s → DefaultPose; B/b → LocoMode; A/a → task; Stop/x → stop",
+            (f"WAITING FOR BRIDGES: startup timeout {self.startup_timeout_s:g}s"
+             if self.startup_timeout_s else
+             "ZERO TORQUE: Start/s → DefaultPose; B/b → standing; A/a → task; Stop/x → stop"),
             flush=True,
         )
+
+    def _reset_standing(self, states, snapshot):
+        if self.standing_policy is not None:
+            self.standing_policy.reset(states, snapshot)
+        else:
+            for loco in self.loco_modes:
+                loco.reset()
+        for robot,state in zip(self.robots,states):
+            robot.prepare(state)
 
     def _read_inputs(self):
         if self.input_mode == "hardware":
             # Independent bridge clocks/ticks cannot require exact equality.
             return super()._read_inputs()
         states = [robot.read(self.state_timeout_s) for robot in self.robots]
+        self._input_status = ", ".join(
+            f"{name}={'received' if state is not None else 'missing'}"
+            for name, state in zip(("A", "B"), states))
         deadline = time.monotonic() + self.state_timeout_s
         # A retry packet can remain in one UDP receiver while the other has
         # already received the next snapshot. Drain only the older side; never
@@ -89,7 +116,12 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
             return None, None, "missing_bridge_state"
         if any(self._state_age_s(state) > self.state_timeout_s for state in states):
             return None, None, "stale_bridge_state"
-        if (
+        # Matching non-null source stamps identify one frozen MuJoCo snapshot.
+        # UDP retries and receiver scheduling can skew arrival times without
+        # skewing the simulated state. Applying the hardware arrival-skew gate
+        # here can deadlock startup: no command -> no new snapshot -> more retries.
+        # Retain the conservative gate for legacy inputs without source stamps.
+        if states[0].state_receive_time_ns is None and (
             abs(states[0].packet_arrival_ns - states[1].packet_arrival_ns) * 1e-9
             > self.max_state_skew_s
         ):
@@ -114,11 +146,11 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
         ):
             if phase in self.phase_target_delta:
                 robot.limiter.max_target_delta = self.phase_target_delta[phase]
-            # DefaultPose/LocoMode share the single-G1 target path on both backends.
+            # DefaultPose and legacy LocoMode retain their original target path.
             # The simulator clips actual PD torque at every 200 Hz substep.
             # Rewriting targets using a 50 Hz velocity estimate changes that
             # controller and destabilizes standing. Keep the existing residual
-            # target safety path for task commands on both backends.
+            # target safety path for ScaleBFM standing/task commands on both backends.
             if phase == "zero_torque":
                 enable = 0
             safe = robot.send_pd(
@@ -163,6 +195,8 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
         return result
 
     def _step(self):
+        if self._startup_deadline is None:
+            self._startup_deadline = time.monotonic() + self.startup_timeout_s
         waiting = time.perf_counter()
         states, snapshot, reason = self._read_inputs()
         self._input_wait_s = time.perf_counter() - waiting
@@ -170,9 +204,27 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
         if snapshot is not None:
             self.last_snapshot = snapshot
         if states is None or snapshot is None:
+            if not self._inputs_ready and self.startup_timeout_s > 0:
+                if time.monotonic() < self._startup_deadline:
+                    now = time.monotonic()
+                    if now >= self._next_startup_report:
+                        print(f"WAITING FOR BRIDGES: {reason}; "
+                              f"{self._input_status}; {max(0.0, self._startup_deadline-now):.1f}s remaining; "
+                              "S is not armed until ZERO TORQUE", flush=True)
+                        self._next_startup_report = now + 2.0
+                    return CoordinatorResult(True, self.state, "waiting_for_initial_inputs")
+                reason = f"startup_timeout: {reason}"
             self._send_hold(states)
             self.state = DeploymentState.FAULT
             return CoordinatorResult(False, self.state, reason)
+        object_enabled = getattr(self.pose_provider, "object_enabled", None)
+        if (self.input_mode == "sim" and object_enabled is not None
+                and object_enabled != getattr(self.policy, "residual_enabled", True)):
+            raise RuntimeError("simulator/deploy mode mismatch: pass --scalebfm-only to both processes")
+        if not self._inputs_ready:
+            self._inputs_ready = True
+            if self.startup_timeout_s:
+                print("ZERO TORQUE: both bridges and pose ready; Start/s → DefaultPose; B/b → standing; A/a → task; Stop/x → stop", flush=True)
         stamps = tuple(state.state_receive_time_ns for state in states)
         if self.input_mode == "sim" and stamps[0] != stamps[1]:
             self._send_hold(states)
@@ -195,6 +247,9 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
             for key in ("start", "B", "A", "stop")
         }
         if not self._buttons_initialized:
+            if any(buttons[key] for key in ("start", "B", "A")):
+                print("Startup button ignored: release Start/B/A, then press Start/s again "
+                      "after ZERO TORQUE", flush=True)
             self._previous_buttons = buttons.copy()
             self._buttons_initialized = True
         rises = {
@@ -207,7 +262,7 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                 return self._stop(states)
             # An upright standing threshold is not a motion-tracking failure criterion.
             # The reference may deliberately crouch and lean while grasping.
-            if self.state == DeploymentState.LOCO_STANDING and self.max_tilt_rad is not None:
+            if self.state == self.standing_state and self.max_tilt_rad is not None:
                 for index, state in enumerate(states):
                     q = state.quat_wxyz / np.linalg.norm(state.quat_wxyz)
                     tilt = np.arccos(np.clip(1.0 - 2.0 * (q[1] ** 2 + q[2] ** 2), -1.0, 1.0))
@@ -219,7 +274,8 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                     self._transition_start = [state.q_lab.copy() for state in states]
                     self._transition_elapsed = 0
                     print(
-                        "Start accepted: transitioning to DefaultPose; wait for completion, then press B/b",
+                        f"Start accepted: transitioning to DefaultPose over {self.transition_ticks} control ticks; "
+                        "wait for completion, then press B/b",
                         flush=True,
                     )
                 else:
@@ -228,16 +284,14 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                     return CoordinatorResult(True, self.state, "zero_torque_wait_s")
             elif (self.state == DeploymentState.DEFAULT_POSE and rises["B"]
                   and self._transition_elapsed >= self.transition_ticks):
-                for loco, robot, state in zip(self.loco_modes, self.robots, states):
-                    loco.reset()
-                    robot.prepare(state)
-                self.state = DeploymentState.LOCO_STANDING
+                self._reset_standing(states, snapshot)
+                self.state = self.standing_state
                 print(
-                    "LocoMode standing: confirm both robots are stable, then press A/a",
+                    f"{self.standing_label}: confirm both robots are stable, then press A/a",
                     flush=True,
                 )
             elif (
-                self.state == DeploymentState.LOCO_STANDING
+                self.state == self.standing_state
                 and rises["A"]
                 and not self._task_finished
             ):
@@ -255,7 +309,9 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                 # tracking path; measured q includes normal PD tracking error.
                 self.state = DeploymentState.EXECUTING
                 print(
-                    "A accepted: executing dual ScaleBFM residual reference", flush=True
+                    ("A accepted: executing dual ScaleBFM residual reference"
+                     if getattr(self.policy, "residual_enabled", True) else
+                     "A accepted: executing dual ScaleBFM-only reference"), flush=True
                 )
 
             if self.state == DeploymentState.DEFAULT_POSE:
@@ -266,14 +322,13 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                             for start in self._transition_start]
                 self._send(states, commands, "default_pose")
                 if self._transition_elapsed == max(1, self.transition_ticks):
-                    print("DefaultPose ready: press B/b for LocoMode standing", flush=True)
+                    print(f"DefaultPose ready: press B/b for {self.standing_label}", flush=True)
                 return CoordinatorResult(True, self.state, "default_pose_wait_b")
-            if self.state == DeploymentState.LOCO_STANDING:
-                commands = [
-                    loco.compute(state) for loco, state in zip(self.loco_modes, states)
-                ]
-                self._send(states, commands, "loco_standing")
-                return CoordinatorResult(True, self.state, "loco_mode_standing")
+            if self.state == self.standing_state:
+                commands = (self.standing_policy.compute(states, snapshot) if self.standing_policy is not None else
+                            [loco.compute(state) for loco,state in zip(self.loco_modes,states)])
+                self._send(states, commands, self.standing_state.value)
+                return CoordinatorResult(True, self.state, "scalebfm_default_pose_standing" if self.standing_policy is not None else "loco_mode_standing")
             if self.state == DeploymentState.EXECUTING:
                 step = self.policy.compute(states, snapshot)
                 commands = [
@@ -281,7 +336,7 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                     for target in step.targets
                 ]
                 reference = self.policy.reference.frame(step.frame)[0].object_pos_w
-                if self.task_safety is not None:
+                if self.task_safety is not None and getattr(self.policy, "residual_enabled", True):
                     checked_reference = reference if self._last_reference_position is None else self._last_reference_position
                     checked_frame = step.frame if self._last_reference_position is None else self._last_reference_frame
                     delta = snapshot.object.position_w - checked_reference
@@ -298,12 +353,10 @@ class InteractiveDualCoordinator(DualPolicyCoordinator):
                 )
                 if step.complete:
                     self._task_finished = True
-                    for loco, robot, state in zip(self.loco_modes, self.robots, states):
-                        loco.reset()
-                        robot.prepare(state)
-                    self.state = DeploymentState.LOCO_STANDING
+                    self._reset_standing(states, snapshot)
+                    self.state = self.standing_state
                     print(
-                        "Reference complete; returning to LocoMode standing. Press x to stop",
+                        f"Reference complete; returning to {self.standing_label}. Press x to stop",
                         flush=True,
                     )
                 return CoordinatorResult(True, self.state, "policy_target", step)

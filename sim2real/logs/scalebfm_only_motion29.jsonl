@@ -1,0 +1,1 @@
+{"motion": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_batch_128/motion_000029.npz", "frames": 598, "box_half_extents": [0.48190537095069885, 0.15000000596046448, 0.15000000596046448], "passed": false, "last_frame": 69, "reason": "RuntimeError: object.position_z frame=69 error=0.105m", "wall_seconds": 1.2680748970014974, "policy_mode": "scalebfm_only"}

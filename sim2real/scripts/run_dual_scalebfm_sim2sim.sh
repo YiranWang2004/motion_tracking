@@ -9,12 +9,21 @@ sim_args=()
 deploy_args=()
 while (($#)); do
   case "$1" in
+    --scalebfm-only)
+      sim_args+=("$1")
+      deploy_args+=("$1")
+      ;;
     --headless)
       sim_args+=("$1")
       ;;
     --sim-max-policy-steps)
       [[ $# -ge 2 ]] || { echo "--sim-max-policy-steps requires a value" >&2; exit 2; }
       sim_args+=(--max-policy-steps "$2")
+      shift
+      ;;
+    --initial-scene-source|--vive-config|--vive-hz|--pose-wait-timeout|--pose-max-age)
+      [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; exit 2; }
+      sim_args+=("$1" "$2")
       shift
       ;;
     --config|--reference-bundle)
@@ -33,7 +42,7 @@ done
 # Background processes otherwise inherit /dev/null as stdin. Preserve terminal
 # input for headless s/b/a/x control; a pipeline can also provide scripted keys.
 exec 3<&0
-uv run python src/dual_scalebfm_sim2sim.py "${sim_args[@]}" <&3 &
+uv run --extra vive python src/dual_scalebfm_sim2sim.py "${sim_args[@]}" <&3 &
 sim_pid=$!
 deploy_pid=""
 cleanup() {

@@ -27,7 +27,7 @@ from dual_runtime.constants import POLICY_JOINT_NAMES
 from dual_runtime.sim_pose_provider import DualSimulationPoseProvider
 from dual_scalebfm_sim2sim import DualScaleBFMSim2Sim
 from omnicontact.runtime import BridgeState, MotionBridgeClient
-from omnicontact.loco_mode import LocoModePolicy
+from dual_runtime.scalebfm_standing import DualScaleBFMStanding
 from common.udp_transport import _command_payload
 
 
@@ -39,7 +39,7 @@ def run_motion(config_path, raw, policy, motion, standing_ticks=250):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.yaml', dir=config_path.parent) as cfg:
         yaml.safe_dump(raw, cfg); cfg.flush()
         low = tuple(SimpleNamespace(send_state=lambda **kw: None, close=lambda: None) for _ in range(2))
-        sim = DualScaleBFMSim2Sim(cfg.name, headless=True, reference_bundle=motion, transports=low)
+        sim = DualScaleBFMSim2Sim(cfg.name, headless=True, reference_bundle=motion, transports=low, scalebfm_only=not policy.residual_enabled)
     provider = DualSimulationPoseProvider()
     commands = [None, None]
     clients = []
@@ -68,10 +68,10 @@ def run_motion(config_path, raw, policy, motion, standing_ticks=250):
     ticks = round(settings['default_pose_duration_s']*raw['control_frequency_hz'])
     pre = raw.get('preflight',{})
     coordinator = InteractiveDualCoordinator(*sessions, provider, policy, enable_a=True, enable_b=True,
-        loco_modes=tuple(LocoModePolicy(assets,list(POLICY_JOINT_NAMES)) for _ in range(2)),
+        standing_policy=DualScaleBFMStanding(policy,load_default_command(assets)),
         default_command=load_default_command(assets), transition_ticks=ticks,
         phase_target_delta=settings['phase_target_delta'], require_button_release=True,
-        max_tilt_rad=settings['max_tilt_rad'], task_safety=settings['task_safety'], **pre)
+        max_tilt_rad=settings['max_tilt_rad'], task_safety=settings['task_safety'] if policy.residual_enabled else None, **pre)
     start_b = 50 + ticks + 50
     start_a = start_b + standing_ticks
     complete_tick = None
@@ -92,7 +92,7 @@ def run_motion(config_path, raw, policy, motion, standing_ticks=250):
             sim.step_policy_interval(tuple(commands)); sim._snapshot_id += 1
             if complete_tick is not None and i-complete_tick >= 150:
                 report['passed'] = True
-                report['reason'] = 'full_reference_then_3s_loco'
+                report['reason'] = 'full_reference_then_3s_scalebfm_standing'
                 break
         else: report['reason'] = 'did_not_complete'
     except Exception as exc:
@@ -111,10 +111,11 @@ def main():
     parser.add_argument('--start',type=int,default=0)
     parser.add_argument('--count',type=int,default=128)
     parser.add_argument('--stop-on-pass',action='store_true')
+    parser.add_argument('--scalebfm-only', action='store_true', help='skip residual checkpoint and actor')
     args=parser.parse_args()
     cfg=Path(args.config).resolve(); raw=yaml.safe_load(cfg.read_text())
-    artifacts=resolve_artifacts(cfg,raw)
-    policy=DualScaleBFMResidualPolicy(**artifacts, device='cpu',
+    artifacts=resolve_artifacts(cfg,raw,include_residual=not args.scalebfm_only)
+    policy=DualScaleBFMResidualPolicy(**artifacts, device='cpu', residual_enabled=not args.scalebfm_only,
         inference_precision=raw.get('inference_precision','fp32'),control_mode=raw['control_mode'],
         future_step=raw['future_step'],residual_scale=raw['residual_scale'],start_frame=raw['start_frame'],
         reference_alignment=raw['reference_alignment'],torch_num_threads=raw['torch_num_threads'])
@@ -124,6 +125,7 @@ def main():
             try:
                 with contextlib.redirect_stdout(console): report=run_motion(cfg,raw,policy,motion)
             except Exception as exc: report={'motion':str(motion),'passed':False,'reason':f'{type(exc).__name__}: {exc}'}
+            report['policy_mode'] = 'scalebfm_only' if args.scalebfm_only else 'scalebfm_residual'
             line=json.dumps(report); print(line,flush=True);results.write(line+'\n');results.flush()
             if report['passed'] and args.stop_on_pass: break
 

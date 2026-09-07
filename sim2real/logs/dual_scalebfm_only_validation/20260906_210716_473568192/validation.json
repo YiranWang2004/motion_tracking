@@ -1,0 +1,17 @@
+{
+  "reference": "cfgen_box1m_lift_drop.npz",
+  "object_enabled": false,
+  "passed": true,
+  "frames": [
+    1,
+    429
+  ],
+  "residual_max": 0.0,
+  "post_task_standing_ticks": 572,
+  "final_height_m": [
+    0.7673316597938538,
+    0.7673361897468567
+  ],
+  "task_processing_p95_ms": 9.24478000088129,
+  "final_state": "stopped"
+}

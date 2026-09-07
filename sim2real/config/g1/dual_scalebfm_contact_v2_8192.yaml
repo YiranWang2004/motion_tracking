@@ -12,7 +12,7 @@ control:
   require_button_release: true
   phase_target_delta:
     default_pose: 0.02
-    loco_standing: 1.0
+    scalebfm_standing: 1.0
     executing: 1.0
 task_safety:
   object_position_z_error_m: 0.1
@@ -20,7 +20,7 @@ task_safety:
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: ../../logs/dual_scalebfm_contact_v2_8192
-reference_alignment: xyyaw
+reference_alignment: none
 start_frame: 1
 control_mode: 2
 future_step: 5
@@ -44,7 +44,7 @@ simulation:
   lockstep_timeout_s: 1.0
   state_retry_s: 0.05
   box_half_extents:
-  - 0.48190537
+  - 0.5
   - 0.15
   - 0.15
   robots:
@@ -61,7 +61,7 @@ simulation:
         cmd_host: 127.0.0.1
         cmd_port: 56102
 preflight:
-  max_partner_position_error_m: 0.2
+  max_partner_position_error_m: 0.8
   max_object_position_error_m: 0.2
   max_box_size_error_m: 0.03
   max_robot_orientation_error_rad: 0.35
@@ -96,5 +96,5 @@ artifact_validation_notes:
     training scripts; TensorBoard has no hyperparameter records.
   residual_scale_evidence: 0.10 is the repository deployment/training default; original
     run command unavailable.
-  reference: cfgen_batch_128/motion_000029.npz, 598 frames, half extents [0.48190537,
+  reference: cfgen_box1m_lift_drop.npz, 430 frames, half extents [0.5,
     0.15, 0.15]

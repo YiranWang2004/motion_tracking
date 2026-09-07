@@ -1,6 +1,12 @@
 # 双 G1：sim2sim 与 sim2real 流程对齐
 
-> 最新默认动作已改为 `motion_000029`，已通过两次完整 UDP 闭环；此前 `motion_000000` 的失败记录保留为历史。详见 [默认 motion 筛选报告](DUAL_DEFAULT_MOTION_SELECTION_ZH.md)。
+> 当前双机默认采用世界系参考：`reference_alignment: none`。实际 A、B、箱子分别与各自 reference 世界系位姿比较；虚影不随实际 A 平移或旋转。旧的 A 锚定描述仅适用于显式选择 `xyyaw` 的历史配置。位置门限暂沿用 `preflight.max_partner_position_error_m`，现在同时检查 A 和 B。实测标定世界系需与 motion 世界系一致；本次不自动重定位参考、不放宽门限。
+
+> 2026-09-06：双机 B 阶段现统一使用 **ScaleBFM 跟踪静态 DefaultPose**，任务完成后也回到该阶段；正式入口不再加载走路策略 `LocoMode.onnx`。启动命令不变，sim2sim 与实机共用实现。机制与最新验证见 [ScaleBFM 站立说明](DUAL_SCALEBFM_STANDING_ZH.md)。
+
+> 2026-09-06 默认动作更新：现已改为 `cfgen_box1m_lift_drop.npz`（430 帧），箱子半尺寸 `[0.5, 0.15, 0.15]`。下文 motion_000029 的筛选与闭环结果保留为历史，不是新默认动作的验证结果。
+
+> 历史默认动作曾改为 `motion_000029`，已通过两次完整 UDP 闭环；此前 `motion_000000` 的失败记录保留为历史。详见 [默认 motion 筛选报告](DUAL_DEFAULT_MOTION_SELECTION_ZH.md)。
 
 更新：2026-09-05。适用于 `deploy_dual_scalebfm_residual.py` 和两个
 `dual_scalebfm_*.yaml`。单机器人 OmniContact 入口不在这次重构范围内。
@@ -20,14 +26,14 @@
 | --- | --- |
 | 启动 | ZERO TORQUE，等待新的 Start/s 按键沿；不因启动时按键已按住而使能 |
 | DefaultPose | 从各自测量关节角插值，50 Hz 下用 100 tick 完成两秒过渡，再持续保持 |
-| 站立 | DefaultPose ready 后重新按 B/b，独立初始化两份 LocoMode 循环状态 |
+| 站立 | DefaultPose ready 后重新按 B/b，初始化独立站立历史，由 ScaleBFM 批量跟踪静态 DefaultPose |
 | 搬运 | A/a 时执行三物体几何预检，以当时机器人 A 位姿对齐 reference，再运行耦合策略 |
-| 完成 | reference 完成后回到独立 LocoMode；本进程不重复播放任务 |
+| 完成 | reference 完成后回到 ScaleBFM DefaultPose 站立；本进程不重复播放任务 |
 | 停止 | 任一侧 Stop/x 对两侧发送 kp=0、kd=8 的阻尼命令并退出 |
 | 目标限制 | 关节范围限制及各阶段 max_target_delta 共用；残差阶段保留估计力矩限制 |
 | 状态故障 | 缺失、过期、双桥状态偏斜超限均终止，尝试向两侧发送阻尼 |
-| 运行保护 | 仅 LocoMode 站立阶段使用绝对倾角限制；任务阶段检查箱子相对已执行 reference 的高度、位置误差 |
-| 实时检查 | 两端检查控制处理耗时，包含 LocoMode；扣除等待输入的时间；连续慢 tick 才终止 |
+| 运行保护 | 仅 ScaleBFM 站立阶段使用绝对倾角限制；任务阶段检查箱子相对已执行 reference 的高度、位置误差 |
+| 实时检查 | 两端检查控制处理耗时，包含 ScaleBFM 站立；扣除等待输入的时间；连续慢 tick 才终止 |
 | 记录/回放 | 共用状态、原因、实际目标及 PD 增益、enable、按钮、输入时间戳、计算耗时、有效配置和 A 时刻对齐位姿 |
 
 `ZERO TORQUE` 显式发送 kp=0、kd=0。`enable=0` 的非零位置增益命令在
@@ -53,7 +59,7 @@ control:
   require_button_release: true
   phase_target_delta:
     default_pose: 0.02
-    loco_standing: 1.0
+    scalebfm_standing: 1.0
     executing: 1.0
 task_safety:
   object_position_z_error_m: 0.1
@@ -63,7 +69,8 @@ task_safety:
 目标变化值单位是 rad/控制 tick，不是 rad/s。任务阶段恢复原仿真值 1.0；
 上次整合误改为 0.005，破坏了动态目标跟踪，不能因为数值更小就认为更安全。
 这是共用配置，两端任务限幅都会变为 1.0；本次只在仿真中验证，未运行实机。
-DefaultPose/LocoMode 沿用单 G1 目标路径，不做基于 50 Hz 状态估计的逆力矩目标重写；
+S 后的 DefaultPose PD 过渡不做基于 50 Hz 状态估计的逆力矩目标重写；
+B 后的 ScaleBFM 站立使用基础模型的 PD 增益，与任务阶段一样保留估计力矩限制；
 仿真每个物理子步仍裁剪实际 PD 力矩，实机实际执行受硬件控制环约束。
 两端软件路径相同并不意味着电机侧实际力矩完全相同。
 
@@ -146,10 +153,10 @@ wrapper 已同时声明 `dual-policy` 和 `vive` 依赖。
   实机从测量关节角过渡，没有软件浮动基座锁定，支撑条件不同。合成测试覆盖插值逻辑，但默认场景
   不能证明任意实机初始关节角都能安全完成过渡。
 - 仿真位姿为 MuJoCo 真值；实机持续读取三个 Tracker，并应用标定外参，受噪声、遮挡、延迟影响。
-  双机当前没有单机器人那种启动时读取一次 Vive 并导入场景的选项。
-- 当前仿真为了让单 G1 LocoMode 稳定，使用单机的关节 armature/阻尼/摩擦，保留双机训练碰撞几何。
+  双机现支持启动时读取一次 Vive 并导入场景，详见 [实测场景启动](DUAL_VIVE_INITIAL_SCENE_ZH.md)。
+- 当前仿真沿用此前站立修复引入的单机关节 armature/阻尼/摩擦，保留双机训练碰撞几何。
   这不是原训练物理模型的完整复制，也不代表已辨识实机动力学。
-- 当前 Vive JSON 箱子尺寸仍须按实物标定，与 reference 的半尺寸约 `[0.48190537, 0.15, 0.15]`
+- 当前 Vive JSON 箱子尺寸仍须按实物标定，与 reference 的半尺寸约 `[0.5, 0.15, 0.15]`
   一致；不能用现有 `[0.15, 0.15, 0.15]` 直接认为通过。几何检查在 A 时执行。
 - 双机任务仍按 reference 执行，没有单机器人的 `--goal-position` 接口；统一运行流程不等于统一策略模型。
 
@@ -176,3 +183,9 @@ wrapper 已同时声明 `dual-policy` 和 `vive` 依赖。
 没有运行实机或实际 Vive 测试。当前证据证明上次整合引入了不适当的限幅和倾角退出，
 这两项回退已修正。上述 motion_000000 复测未完整通过；后续选中的 motion_000029
 已通过两次完整闭环，详见本文顶部的默认 motion 筛选报告。
+
+## 从实测布局启动 sim2sim
+
+现支持 `--initial-scene-source vive` 一次性导入双机 pelvis 和箱子完整位姿，
+之后关闭 OpenVR，由 MuJoCo 独立演化。空载模式只读取两台机器人。
+完整命令、标定要求和验证范围见 [Vive 实测场景启动指南](DUAL_VIVE_INITIAL_SCENE_ZH.md)。

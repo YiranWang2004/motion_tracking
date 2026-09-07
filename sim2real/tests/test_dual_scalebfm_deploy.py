@@ -307,3 +307,48 @@ def test_production_coordinator_routes_default_then_coupled_targets():
     np.testing.assert_allclose(robot_b.sent[-1][1], -0.2)
     assert robot_a.sent[-1][2] == 1
     assert robot_b.sent[-1][2] == 0
+
+
+def test_vive_dropout_retains_original_stamp_and_faults_after_300ms(monkeypatch, caplog):
+    import logging
+
+    clock = [100.0]
+    monkeypatch.setattr(time, "monotonic", lambda: clock[0])
+    identity = RigidTransform([0, 0, 0], [0, 0, 0, 1])
+    config = DualViveDeploymentConfig(
+        "A", "B", "BOX", identity, identity, identity, identity, [0.3, 0.15, 0.15], True
+    )
+    reader = FakeTrackerReader()
+    provider = DualVivePoseProvider(config, reader=reader)
+    original_read = reader.read_all
+    reader.read_all = lambda serials: {serial: None for serial in serials}
+    assert not provider.update_once()
+    assert provider.get_snapshot() is None
+    reader.read_all = original_read
+    assert provider.update_once()
+    snapshot = provider.get_snapshot()
+    a, b = FakeSession(), FakeSession()
+    coordinator = DualPolicyCoordinator(
+        a, b, provider, FakeCoupledPolicy(), pose_timeout_s=0.30, enable_a=True, enable_b=True
+    )
+    reader.read_all = lambda serials: dict(original_read(serials), A=None)
+    with caplog.at_level(logging.INFO):
+        clock[0] = 100.01
+        assert not provider.update_once()
+        clock[0] = 100.29
+        assert not provider.update_once()
+        assert provider.get_snapshot() is snapshot
+        assert snapshot.robot_a.stamp_s == snapshot.robot_b.stamp_s == 100.0
+        assert coordinator._read_inputs()[2] == "ready"
+        clock[0] = 100.301
+        assert coordinator._read_inputs()[2] == "stale_vive_snapshot"
+        result = coordinator.step()
+        assert not result.ok and result.state == DeploymentState.FAULT
+        assert a.sent[-1][0] == b.sent[-1][0] == "hold"
+        assert a.sent[-1][2] == b.sent[-1][2] == 0
+        reader.read_all = original_read
+        assert provider.update_once()
+        assert provider.get_snapshot() is not snapshot
+        assert provider.get_snapshot().robot_a.stamp_s == clock[0]
+    assert "Tracker A invalid" in caplog.text
+    assert "Tracker A recovered after 291.0 ms" in caplog.text

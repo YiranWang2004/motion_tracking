@@ -24,7 +24,8 @@ low_level:
   damping_kd: 8.0
   wait_lowstate_timeout_s: 0.0
   # After the first valid command, a gap longer than this sends damping and
-  # permanently latches the bridge until it is restarted.
+  # latches damping. A new session-aware deploy can re-arm without restarting
+  # the bridge; legacy clients still require a bridge restart.
   command_timeout_s: 0.20
   release_motion_service: true
   release_required: true

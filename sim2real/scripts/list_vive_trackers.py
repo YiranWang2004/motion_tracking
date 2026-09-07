@@ -27,17 +27,46 @@ def main() -> int:
         for serial, index in sorted(devices.items()):
             print(f"  serial={serial}  openvr_index={index}")
         valid_counts = {serial: 0 for serial in devices}
+        missing_frames = {serial: [] for serial in devices}
+        consecutive_missing = {serial: 0 for serial in devices}
+        longest_missing = {serial: 0 for serial in devices}
         attempts = 0
-        end = time.monotonic() + args.seconds
+        start = time.monotonic()
+        end = start + args.seconds
+        print("Frame numbers are 1-based read attempts, not SteamVR frame IDs.", flush=True)
         while time.monotonic() < end:
             samples = reader.read_all()
             attempts += 1
-            for serial, sample in samples.items():
-                valid_counts[serial] += int(sample is not None)
+            elapsed = time.monotonic() - start
+            missing = []
+            for serial in devices:
+                if samples.get(serial) is not None:
+                    valid_counts[serial] += 1
+                    consecutive_missing[serial] = 0
+                else:
+                    missing_frames[serial].append(attempts)
+                    consecutive_missing[serial] += 1
+                    longest_missing[serial] = max(
+                        longest_missing[serial], consecutive_missing[serial]
+                    )
+                    missing.append(serial)
+            if missing:
+                print(
+                    f"  MISSING frame={attempts} t={elapsed:.3f}s "
+                    f"trackers={', '.join(sorted(missing))}",
+                    flush=True,
+                )
             time.sleep(0.01)
         print(f"Pose health over {attempts} reads:")
         for serial in sorted(devices):
-            print(f"  {serial}: valid={valid_counts[serial]}/{attempts}")
+            rate = 100.0 * valid_counts[serial] / attempts if attempts else 0.0
+            print(
+                f"  {serial}: valid={valid_counts[serial]}/{attempts} "
+                f"({rate:.2f}%) missing={len(missing_frames[serial])} "
+                f"longest_missing_run={longest_missing[serial]} reads"
+            )
+            frames = ", ".join(str(frame) for frame in missing_frames[serial])
+            print(f"    missing_frames: [{frames}]")
     finally:
         reader.stop()
     return 0

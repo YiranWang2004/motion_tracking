@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +21,9 @@ from omnicontact.perception.vive_pose import (
 )
 
 from .dual_pose_provider import DualPoseSnapshot
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -66,10 +70,14 @@ class DualViveDeploymentConfig:
         object.__setattr__(self, "object_half_extents_m", extents.copy())
 
     @classmethod
-    def load(cls, path: str | Path) -> DualViveDeploymentConfig:
+    def load(cls, path: str | Path, *, require_object: bool = True) -> DualViveDeploymentConfig:
         resolved = Path(path).expanduser().resolve()
         try:
             raw: dict[str, Any] = json.loads(resolved.read_text(encoding="utf-8"))
+            if not require_object:
+                raw["object_tracker_serial"] = "__unused_object__"
+                raw["object_tracker_to_object"] = {"position_m": [0, 0, 0], "quaternion_xyzw": [0, 0, 0, 1]}
+                raw["object_half_extents_m"] = [0.5, 0.15, 0.15]
             return cls(
                 robot_a_tracker_serial=raw["robot_a_tracker_serial"],
                 robot_b_tracker_serial=raw["robot_b_tracker_serial"],
@@ -101,10 +109,12 @@ class DualVivePoseProvider:
         config: DualViveDeploymentConfig,
         *,
         poll_hz: float = 100.0,
+        require_object: bool = True,
         reader: OpenVRTrackerReader | None = None,
     ) -> None:
         if poll_hz <= 0.0:
             raise ValueError("poll_hz must be positive")
+        self.require_object = require_object
         self.config = config
         self.poll_hz = float(poll_hz)
         self.serials = (
@@ -112,6 +122,8 @@ class DualVivePoseProvider:
             config.robot_b_tracker_serial,
             config.object_tracker_serial,
         )
+        if not require_object:
+            self.serials = self.serials[:2]
         self.reader = reader or OpenVRTrackerReader(list(self.serials))
         self._lock = threading.Lock()
         self._snapshot: DualPoseSnapshot | None = None
@@ -123,6 +135,8 @@ class DualVivePoseProvider:
         self._last_object_stamp: float | None = None
         self.valid_updates = 0
         self.invalid_updates = 0
+        self._missing_since: dict[str, float] = {}
+        self._missing_reported: dict[str, float] = {}
 
     @property
     def error(self) -> BaseException | None:
@@ -164,14 +178,31 @@ class DualVivePoseProvider:
 
     def update_once(self) -> bool:
         samples = self.reader.read_all(self.serials)
-        if any(samples.get(serial) is None for serial in self.serials):
+        now = time.monotonic()
+        missing = [serial for serial in self.serials if samples.get(serial) is None]
+        for serial in self.serials:
+            if serial in missing:
+                if serial not in self._missing_since:
+                    self._missing_since[serial] = now
+                    self._missing_reported[serial] = now
+                    LOGGER.warning("Vive Tracker %s invalid; retaining last valid snapshot", serial)
+                elif now - self._missing_reported[serial] >= 0.1:
+                    LOGGER.warning("Vive Tracker %s still invalid for %.1f ms", serial,
+                                   1000.0 * (now - self._missing_since[serial]))
+                    self._missing_reported[serial] = now
+            elif serial in self._missing_since:
+                LOGGER.info("Vive Tracker %s recovered after %.1f ms", serial,
+                            1000.0 * (now - self._missing_since.pop(serial)))
+                self._missing_reported.pop(serial, None)
+        if missing:
             self.invalid_updates += 1
-            with self._lock:
-                self._snapshot = None
+            # Keep the complete atomic snapshot AND its original timestamps.
+            # The coordinator enforces pose_timeout_s; partial updates must not
+            # make old poses appear fresh. Startup still has no snapshot.
             self._last_object_transform = None
             self._last_object_stamp = None
             return False
-        sample_a, sample_b, sample_object = (samples[serial] for serial in self.serials)
+        sample_a, sample_b = (samples[serial] for serial in self.serials[:2])
         stamp = time.monotonic()
         world_from_a = self.config.world_from_steamvr.compose(
             sample_to_transform(sample_a)
@@ -179,9 +210,12 @@ class DualVivePoseProvider:
         world_from_b = self.config.world_from_steamvr.compose(
             sample_to_transform(sample_b)
         ).compose(self.config.robot_b_tracker_to_pelvis)
-        world_from_object = self.config.world_from_steamvr.compose(
-            sample_to_transform(sample_object)
-        ).compose(self.config.object_tracker_to_object)
+        world_from_object = (
+            self.config.world_from_steamvr.compose(
+                sample_to_transform(samples[self.serials[2]])
+            ).compose(self.config.object_tracker_to_object)
+            if self.require_object else RigidTransform(np.zeros(3), np.array([0., 0., 0., 1.]))
+        )
         linear_velocity = np.zeros(3, dtype=np.float32)
         angular_velocity = np.zeros(3, dtype=np.float32)
         if (

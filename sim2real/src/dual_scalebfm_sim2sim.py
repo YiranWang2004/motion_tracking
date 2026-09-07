@@ -24,6 +24,8 @@ import yaml
 from common.udp_latest import LatestPacket
 from common.udp_transport import UDPRobotLow
 from dual_runtime.constants import POLICY_JOINT_NAMES
+from dual_runtime.reference import (_yaw_from_wxyz, _yaw_quaternion,
+                                    quat_apply_batch, quat_mul_left_batch)
 from dual_runtime.sim_control import load_default_command
 
 
@@ -87,9 +89,12 @@ class DualScaleBFMSim2Sim:
         config_path: str | Path,
         *,
         headless: bool = False,
+        scalebfm_only: bool = False,
         reference_bundle: str | Path | None = None,
+        initial_scene=None,
         transports: tuple[Any, Any] | None = None,
     ) -> None:
+        self.object_enabled = not scalebfm_only
         self.config_path = Path(config_path).expanduser().resolve()
         self.raw = _load_yaml(self.config_path)
         sim = self.raw.get("simulation")
@@ -146,6 +151,11 @@ class DualScaleBFMSim2Sim:
         box.inertia = box.mass / 3.0 * np.array([
             half[1]**2 + half[2]**2, half[0]**2 + half[2]**2, half[0]**2 + half[1]**2,
         ])
+        if not self.object_enabled:
+            # Keep an inert pose placeholder for the common telemetry schema;
+            # no box geometry, collision, contact load, or visible object remains.
+            spec.delete(spec.geom("box_collision"))
+            box.gravcomp = 1.0
         self.model = spec.compile()
         self.model.opt.timestep = 1.0 / self.physical_hz
         self.data = mujoco.MjData(self.model)
@@ -195,7 +205,13 @@ class DualScaleBFMSim2Sim:
             self.data.qpos[binding.root_qpos + 2] = float(
                 sim.get("initial_root_height_m", 0.793)
             )
+        if initial_scene is not None:
+            self._initialize_from_scene(initial_scene)
         mujoco.mj_forward(self.model, self.data)
+        self._ghost_data = mujoco.MjData(self.model)
+        self._ghost_visible = True
+        self._ghost_alignment = None
+        self._ghost_frame = self.start_frame
         self._phase = "zero_torque"
         self._policy_frame = -1
         self._command_reference_position = None
@@ -320,8 +336,14 @@ class DualScaleBFMSim2Sim:
             reference_extents = np.asarray(
                 data["training_box_half_extents"], dtype=np.float32
             )
-            if not np.allclose(reference_extents, self.box_half_extents, atol=1e-6):
+            if self.object_enabled and not np.allclose(reference_extents, self.box_half_extents, atol=1e-6):
                 raise ValueError("simulation box size does not match reference bundle")
+            self._ghost_roots = np.stack([
+                np.concatenate((data[f"training_robot_{i}_body_pos_w"][:, 0],
+                                data[f"training_robot_{i}_body_quat_w"][:, 0]), axis=-1)
+                for i in range(2)])
+            self._ghost_joints = np.stack([data[f"training_robot_{i}_joint_pos"] for i in range(2)])
+            self._ghost_box_quat = data["training_object_body_quat_w"].copy()
             self._reference_object_position = np.asarray(
                 data["training_object_body_pos_w"], dtype=np.float64
             ).copy()
@@ -344,6 +366,31 @@ class DualScaleBFMSim2Sim:
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
+    def _initialize_from_scene(self, snapshot) -> None:
+        if self.object_enabled and not np.allclose(
+            snapshot.object.half_extents, self.box_half_extents, rtol=0, atol=1e-6
+        ):
+            raise ValueError("Vive box size does not match simulation/reference box size")
+        entries = [(binding.root_qpos, pose) for binding, pose in zip(
+            self.bindings, (snapshot.robot_a, snapshot.robot_b))]
+        if self.object_enabled:
+            entries.append((self.box_qpos, snapshot.object))
+        for address, pose in entries:
+            position = np.asarray(pose.position_w, dtype=float).reshape(3)
+            quat = np.asarray(pose.quaternion_xyzw, dtype=float).reshape(4)
+            norm = np.linalg.norm(quat)
+            if not np.all(np.isfinite(position)) or not np.isfinite(norm) or norm < 1e-8:
+                raise ValueError("invalid Vive initial scene pose")
+            self.data.qpos[address:address + 7] = np.concatenate(
+                (position, (quat / norm)[[3, 0, 1, 2]]))
+        self.data.qvel[:] = 0
+        self.data.ctrl[:] = 0
+        print("[sim2sim] captured Vive scene: "
+              f"A={snapshot.robot_a.position_w.tolist()}, "
+              f"B={snapshot.robot_b.position_w.tolist()}, "
+              f"box={snapshot.object.position_w.tolist() if self.object_enabled else 'disabled'}; "
+              "joints=DefaultPose; live tracking closed", flush=True)
+
     def _reference_frame(self) -> int:
         return min(
             max(self.start_frame, self._policy_frame),
@@ -351,7 +398,7 @@ class DualScaleBFMSim2Sim:
         )
 
     def task_termination_reason(self) -> str | None:
-        if self._phase != "executing":
+        if not self.object_enabled or self._phase != "executing":
             return None
         frame = self._reference_frame()
         actual = self.data.xpos[self.box_body]
@@ -412,6 +459,7 @@ class DualScaleBFMSim2Sim:
             "zero_torque",
             "default_pose",
             "loco_standing",
+            "scalebfm_standing",
             "executing",
             "stopped",
         }:
@@ -462,6 +510,7 @@ class DualScaleBFMSim2Sim:
             )
         box_velocity = self.data.qvel[self.box_dof : self.box_dof + 6]
         return {
+            "object_enabled": self.object_enabled,
             "snapshot_id": self._snapshot_id,
             "simulation_time_s": float(self.data.time),
             "robots": robots,
@@ -476,8 +525,16 @@ class DualScaleBFMSim2Sim:
 
     def key_callback(self, keycode: int) -> None:
         key = chr(keycode).lower()
+        if key == "g":
+            self._ghost_visible = not self._ghost_visible
+            print(f"[sim2sim] reference ghosts {'on' if self._ghost_visible else 'off'}", flush=True)
+            return
         button = {"s": "start", "b": "B", "a": "A", "x": "stop"}.get(key)
         if button is not None:
+            if self._snapshot_id == 0 and button != "stop":
+                print(f"[sim2sim] {key.upper()} ignored before initial control handshake; "
+                      "wait for ZERO TORQUE, then press S again", flush=True)
+                return
             with self._key_lock:
                 # Stop cannot be delayed behind a queued startup sequence.
                 if button == "stop":
@@ -592,13 +649,16 @@ class DualScaleBFMSim2Sim:
         self._phase, self._policy_frame = a.phase, a.frame
         self._command_reference_position = a.reference_position
         if not self._roots_released and a.phase == "executing":
-            raise RuntimeError("task command received before paired LocoMode release")
+            raise RuntimeError("task command received before paired standing-policy release")
         if a.phase == "stopped":
             self.apply_commands(commands)
             return
         if a.phase == "executing":
+            if not self._task_started:
+                self._ghost_alignment = self._reference_preview_alignment()
+            self._ghost_frame = a.frame
             self._task_started = True
-        if a.phase == "loco_standing":
+        if a.phase in {"loco_standing", "scalebfm_standing"}:
             self._roots_released = True
         lock_roots = not self._roots_released
         if a.phase == "zero_torque":
@@ -671,11 +731,11 @@ class DualScaleBFMSim2Sim:
                     )
                 )
                 frame_text = str(reference_frame) if self._phase == "executing" else "-"
-                error_text = f"{object_error:.3f}m" if self._phase == "executing" else "n/a"
+                error_text = f"{object_error:.3f}m" if self.object_enabled and self._phase == "executing" else "n/a"
                 print(
                     f"[sim2sim] phase={self._phase} steps={steps} sim_time={self.data.time:.2f}s "
                     f"frame={frame_text} root_z=({root_z[0]:.3f}, {root_z[1]:.3f}) "
-                    f"box_z={box_z:.3f} object_error={error_text} "
+                    f"box_z={format(box_z, '.3f') if self.object_enabled else 'n/a'} object_error={error_text} "
                     f"q_error=({joint_errors[0]:.3f}, {joint_errors[1]:.3f})rad "
                     f"dq_max=({joint_speeds[0]:.3f}, {joint_speeds[1]:.3f})rad/s "
                     f"torque_max=({torques[0]:.1f}, {torques[1]:.1f})Nm",
@@ -685,10 +745,53 @@ class DualScaleBFMSim2Sim:
                 self._draw_status()
                 self._viewer.sync()
 
+    def _reference_preview_alignment(self):
+        if self.raw.get("reference_alignment", "none") == "none":
+            return np.array([1., 0., 0., 0.]), np.zeros(3)
+        binding = self.bindings[0]
+        actual = self.data.qpos[binding.root_qpos:binding.root_qpos + 7]
+        # Policy alignment uses robot A pelvis at raw frame zero, including Z.
+        origin = self._ghost_roots[0, 0]
+        rotation = _yaw_quaternion(_yaw_from_wxyz(actual[3:]) - _yaw_from_wxyz(origin[3:]))
+        translation = actual[:3] - quat_apply_batch(rotation, origin[:3][None])[0]
+        return rotation, translation
+
+    def _update_reference_ghost(self):
+        rotation, translation = (self._reference_preview_alignment()
+                                 if self._ghost_alignment is None else self._ghost_alignment)
+        frame = int(np.clip(self._ghost_frame, 0, self._ghost_roots.shape[1] - 1))
+        self._ghost_data.qpos[:] = self.data.qpos
+        for i, binding in enumerate(self.bindings):
+            raw = self._ghost_roots[i, frame]
+            self._ghost_data.qpos[binding.root_qpos:binding.root_qpos + 7] = np.r_[
+                quat_apply_batch(rotation, raw[:3][None])[0] + translation,
+                quat_mul_left_batch(rotation, raw[3:][None])[0]]
+            self._ghost_data.qpos[binding.joint_qpos] = self._ghost_joints[i, frame]
+        self._ghost_data.qpos[self.box_qpos:self.box_qpos + 7] = np.r_[
+            quat_apply_batch(rotation, self._reference_object_position[frame][None])[0] + translation,
+            quat_mul_left_batch(rotation, self._ghost_box_quat[frame][None])[0]]
+        mujoco.mj_forward(self.model, self._ghost_data)
+
+    def _draw_reference_ghost(self, scene):
+        if not self._ghost_visible:
+            return
+        self._update_reference_ghost()
+        start = scene.ngeom
+        option = mujoco.MjvOption()
+        mujoco.mjv_addGeoms(self.model, self._ghost_data, option, mujoco.MjvPerturb(),
+                           mujoco.mjtCatBit.mjCAT_DYNAMIC, scene)
+        for index in range(start, scene.ngeom):
+            geom = scene.geoms[index]
+            geom.rgba[:] = [0.1, 0.85, 1.0, 0.28]
+            geom.transparent = True
+            geom.matid = -1
+            geom.emission = 0.35
+
     def _draw_status(self) -> None:
         with self._viewer.lock():
             scene = self._viewer.user_scn
             scene.ngeom = 0
+            self._draw_reference_ghost(scene)
             if self._task_started:
                 return
             for binding in self.bindings:
@@ -711,7 +814,7 @@ class DualScaleBFMSim2Sim:
             f"dual ScaleBFM sim2sim: physics={self.physical_hz} Hz "
             f"policy={self.policy_hz:g} Hz decimation={self.decimation}"
         )
-        print("Controls: s → DefaultPose; b → LocoMode; a → task; x → stop", flush=True)
+        print("Controls: s → DefaultPose; b → ScaleBFM DefaultPose standing; a → task; x → stop; g → reference ghosts", flush=True)
         if self._headless:
             print(
                 "Headless: type one key and Enter in the simulator terminal", flush=True
@@ -749,7 +852,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", default=str(ROOT / "config/g1/dual_scalebfm_residual.yaml")
     )
+    parser.add_argument("--initial-scene-source", choices=("config", "vive"), default="config")
+    parser.add_argument("--vive-config", help="dual calibrated JSON; defaults to YAML vive_config")
+    parser.add_argument("--vive-hz", type=float, default=100.0)
+    parser.add_argument("--pose-wait-timeout", type=float, default=10.0)
+    parser.add_argument("--pose-max-age", type=float, default=0.1)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--scalebfm-only", action="store_true", help="empty-handed tracking: remove box geometry")
     parser.add_argument("--reference-bundle", default=None)
     parser.add_argument("--max-policy-steps", type=int, default=None)
     return parser
@@ -759,10 +868,24 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.max_policy_steps is not None and args.max_policy_steps <= 0:
         raise SystemExit("--max-policy-steps must be positive")
+    initial_scene = None
+    if args.initial_scene_source == "vive":
+        from dual_runtime.initial_scene import capture_vive_initial_scene
+        config_path = Path(args.config).expanduser().resolve()
+        raw = _load_yaml(config_path)
+        # Explicit CLI paths follow the shell cwd; YAML paths follow the YAML.
+        vive_path = (Path(args.vive_config).expanduser().resolve() if args.vive_config
+                     else _resolve(config_path.parent, raw["vive_config"]))
+        print(f"[sim2sim] capturing fresh Vive scene from {vive_path}", flush=True)
+        initial_scene = capture_vive_initial_scene(
+            vive_path, require_object=not args.scalebfm_only, poll_hz=args.vive_hz,
+            wait_timeout_s=args.pose_wait_timeout, max_age_s=args.pose_max_age)
     simulation = DualScaleBFMSim2Sim(
         args.config,
         headless=args.headless,
+        scalebfm_only=args.scalebfm_only,
         reference_bundle=args.reference_bundle,
+        initial_scene=initial_scene,
     )
     signal.signal(signal.SIGINT, simulation.close)
     signal.signal(signal.SIGTERM, simulation.close)

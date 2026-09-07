@@ -40,6 +40,7 @@
 #include <unitree/idl/hg/LowCmd_.hpp>
 #include <unitree/idl/hg/LowState_.hpp>
 #include <unitree/robot/b2/motion_switcher/motion_switcher_client.hpp>
+#include "command_session.hpp"
 #include <unitree/robot/channel/channel_factory.hpp>
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -554,7 +555,8 @@ class UdpLatestSender {
 
   void send_state(
       const std::vector<float> & q, const std::vector<float> & dq, const std::vector<float> & quat,
-      const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote)
+      const std::vector<float> & gyro, const std::vector<float> & linacc, const RemoteState & remote,
+      const std::string & command_status)
   {
     std::vector<uint8_t> payload;
     payload.reserve((q.size() + dq.size() + quat.size() + gyro.size() + linacc.size()) * sizeof(float));
@@ -580,7 +582,7 @@ class UdpLatestSender {
     append_float_json(meta, remote.rx);
     meta << ",\"ry\":";
     append_float_json(meta, remote.ry);
-    meta << "},\"state_receive_time_ns\":" << now_ns() << "}";
+    meta << "},\"state_receive_time_ns\":" << now_ns() << ",\"bridge_control\":" << command_status << "}";
 
     uint64_t seq = 0;
     {
@@ -938,7 +940,7 @@ class G1UdpBridge {
               << static_cast<int>(cfg_.low_level.mode_pr) << std::endl;
     if (cfg_.low_level.command_timeout_s > 0.0) {
       std::cout << "[G1Bridge] command watchdog: " << cfg_.low_level.command_timeout_s
-                << " s, latched damping; bridge restart required after timeout" << std::endl;
+                << " s, latched damping; new command session required after timeout" << std::endl;
     } else {
       std::cout << "[G1Bridge] command watchdog: disabled" << std::endl;
     }
@@ -1508,6 +1510,21 @@ class G1UdpBridge {
       dq_policy[i] = dq_real[real_to_policy_[i]];
     }
 
+    // Raw status values are diagnostic evidence, not decoded fault flags.
+    const uint64_t diagnostic_now = now_ns();
+    if (diagnostic_now >= next_motor_diagnostic_ns_.load(std::memory_order_relaxed)) {
+      next_motor_diagnostic_ns_.store(diagnostic_now + 2000000000ULL, std::memory_order_relaxed);
+      std::ostringstream diagnostic;
+      diagnostic << "[G1Bridge] motor_status real_joint_order mode/motorstate/tau_est:";
+      for (size_t i = 0; i < cfg_.real_joint_names.size(); ++i) {
+        const auto & motor = low_state.motor_state().at(i);
+        diagnostic << " " << cfg_.real_joint_names[i] << "="
+                   << static_cast<unsigned>(motor.mode()) << "/"
+                   << motor.motorstate() << "/" << motor.tau_est();
+      }
+      std::cout << diagnostic.str() << std::endl;
+    }
+
     const auto & imu = low_state.imu_state();
     const std::vector<float> quat{
         imu.quaternion()[0], imu.quaternion()[1], imu.quaternion()[2], imu.quaternion()[3]};
@@ -1516,7 +1533,12 @@ class G1UdpBridge {
     const RemoteState remote = apply_stdin_button_overrides(parse_remote(low_state.wireless_remote()));
 
     try {
-      state_sender_.send_state(q_policy, dq_policy, quat, gyro, linacc, remote);
+      std::string command_status;
+      {
+        std::lock_guard<std::mutex> lock(cmd_write_mutex_);
+        command_status = command_session_.status_json(command_watchdog_latched_.load());
+      }
+      state_sender_.send_state(q_policy, dq_policy, quat, gyro, linacc, remote, command_status);
       state_forward_count_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception & exc) {
       state_send_error_count_.fetch_add(1, std::memory_order_relaxed);
@@ -1530,17 +1552,7 @@ class G1UdpBridge {
         g_stop_requested.load(std::memory_order_relaxed)) {
       return;
     }
-    const int64_t packet_seq = static_cast<int64_t>(packet.seq);
-    const int64_t prev_seq = latest_cmd_seq_.exchange(packet_seq);
-    if (packet_seq <= prev_seq) {
-      return;
-    }
     if (!have_mode_machine_.load()) {
-      std::cerr << "[G1Bridge] Ignore UDP command before mode_machine sync" << std::endl;
-      return;
-    }
-    if (command_watchdog_latched_.load(std::memory_order_acquire)) {
-      watchdog_rejected_command_count_.fetch_add(1, std::memory_order_relaxed);
       return;
     }
 
@@ -1582,11 +1594,35 @@ class G1UdpBridge {
 
       {
         std::lock_guard<std::mutex> lock(cmd_write_mutex_);
-        if (command_watchdog_latched_.load(std::memory_order_relaxed)) {
+        const auto extra = packet.data["extra_command"];
+        const auto session = extra && extra.IsMap() ? extra["bridge_session"] : YAML::Node();
+        const bool session_packet = session && session.IsMap();
+        const std::string id = session_packet ? session["id"].as<std::string>() : "";
+        if (session_packet && id.empty()) return;
+        const uint64_t epoch = session_packet ? session["epoch"].as<uint64_t>() : 0;
+        const bool begin = session_packet && session["begin"].as<bool>(false);
+        const bool safe_begin = enable == 0 &&
+            std::all_of(kp_src.begin(), kp_src.end(), [](double x) { return x == 0.0; }) &&
+            std::all_of(kd_src.begin(), kd_src.end(), [](double x) { return x == 0.0; }) &&
+            std::all_of(qd_src.begin(), qd_src.end(), [](double x) { return x == 0.0; });
+        const auto admission = command_session_.accept(
+            id, epoch, packet.seq, begin, safe_begin,
+            command_watchdog_latched_.load(), have_valid_command_);
+        if (admission == CommandSession::Admission::Reject) {
           watchdog_rejected_command_count_.fetch_add(1, std::memory_order_relaxed);
           return;
         }
-        lowcmd_publisher_->Write(cmd);
+        if (admission == CommandSession::Admission::Begin) {
+          // A new session only disarms into damping. Start is still required upstream.
+          publish_damping_command_locked();
+          command_watchdog_latched_.store(false, std::memory_order_release);
+          have_valid_command_ = false;
+          std::cout << "[G1Bridge] new command session accepted; waiting for control" << std::endl;
+          return;
+        }
+        if (!lowcmd_publisher_->Write(cmd)) {
+          command_dds_write_failure_count_.fetch_add(1, std::memory_order_relaxed);
+        }
         last_valid_command_time_ = SteadyClock::now();
         have_valid_command_ = true;
       }
@@ -1662,13 +1698,14 @@ class G1UdpBridge {
         return;
       }
       command_watchdog_latched_.store(true, std::memory_order_release);
+      command_session_.invalidate();
       publish_damping_command_locked();
       tripped = true;
     }
     if (tripped) {
       watchdog_trip_count_.fetch_add(1, std::memory_order_relaxed);
       std::cerr << "[G1Bridge] COMMAND WATCHDOG TIMEOUT after " << elapsed_s
-                << " s: damping latched; restart bridge to re-arm" << std::endl;
+                << " s: damping latched; start a new session-aware deploy to re-arm (legacy clients require bridge restart)" << std::endl;
     }
   }
 
@@ -1748,6 +1785,8 @@ class G1UdpBridge {
               << ", mode=" << state_publish_mode_name(cfg_.freq.state_publish_mode) << ") | command="
               << (static_cast<double>(command_count) / elapsed) << " Hz (" << command_count << ") | cmd_udp_rx="
               << udp_rx_delta << " decoded=" << udp_decoded_delta << " errors=" << udp_errors_delta
+              << " | command_dds_write_failures="
+              << command_dds_write_failure_count_.exchange(0, std::memory_order_relaxed)
               << " | lowstate_crc_errors=" << crc_errors << " duplicate_ticks=" << duplicate_ticks
               << " tick_gap_events=" << tick_gap_events << " tick_missing=" << tick_missing
               << " tick_resets=" << tick_resets << " state_snapshot_overwrites=" << snapshot_overwrites
@@ -1790,6 +1829,7 @@ class G1UdpBridge {
   std::mutex first_state_mutex_;
   std::condition_variable first_state_cv_;
   std::mutex cmd_write_mutex_;
+  CommandSession command_session_{now_ns()};
   SteadyClock::time_point last_valid_command_time_{};
   bool have_valid_command_ = false;
   std::atomic<bool> command_watchdog_latched_{false};
@@ -1814,6 +1854,8 @@ class G1UdpBridge {
   std::atomic<uint64_t> lowstate_unique_tick_{0};
   std::atomic<uint64_t> state_forward_count_{0};
   std::atomic<uint64_t> command_forward_count_{0};
+  std::atomic<uint64_t> command_dds_write_failure_count_{0};
+  std::atomic<uint64_t> next_motor_diagnostic_ns_{0};
   std::atomic<uint64_t> lowstate_crc_error_count_{0};
   std::atomic<uint64_t> lowstate_duplicate_tick_count_{0};
   std::atomic<uint64_t> lowstate_tick_gap_count_{0};
@@ -1828,7 +1870,6 @@ class G1UdpBridge {
   std::atomic<uint64_t> stdin_button_event_count_{0};
   std::atomic<uint64_t> watchdog_trip_count_{0};
   std::atomic<uint64_t> watchdog_rejected_command_count_{0};
-  std::atomic<int64_t> latest_cmd_seq_{-1};
 
   std::mutex policy_delay_mutex_;
   uint64_t policy_delay_count_ = 0;

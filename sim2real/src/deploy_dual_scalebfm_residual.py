@@ -21,7 +21,7 @@ from dual_runtime.policy_coordinator import DeploymentState
 from dual_runtime.runtime_config import shared_control_settings
 from dual_runtime.interactive_control import InteractiveDualCoordinator, load_default_command
 from dual_runtime.constants import POLICY_JOINT_NAMES
-from omnicontact.loco_mode import LocoModePolicy
+from dual_runtime.scalebfm_standing import DualScaleBFMStanding
 from dual_runtime.robot_session import RobotSession, RobotSessionConfig
 from dual_runtime.sim_pose_provider import DualSimulationPoseProvider
 from dual_runtime.scalebfm_residual_policy import DualScaleBFMResidualPolicy
@@ -59,7 +59,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_artifacts(config_path: Path, raw: dict[str, Any]) -> dict[str, Path]:
+def resolve_artifacts(config_path: Path, raw: dict[str, Any], *, include_residual: bool = True) -> dict[str, Path]:
     artifact_raw = raw["artifacts"]
     directory = resolve(config_path.parent, artifact_raw["directory"])
     manifest_path = resolve(directory, artifact_raw["manifest"])
@@ -75,6 +75,8 @@ def resolve_artifacts(config_path: Path, raw: dict[str, Any]) -> dict[str, Path]
         "reference_bundle",
         "kinematics_xml",
     ):
+        if key == "residual_checkpoint" and not include_residual:
+            continue
         path = resolve(directory, artifact_raw[key])
         entry = manifest.get("files", {}).get(path.name)
         if not path.is_file() or not isinstance(entry, dict):
@@ -91,6 +93,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", default=str(ROOT / "config/g1/dual_scalebfm_residual.yaml")
     )
+    parser.add_argument("--scalebfm-only", action="store_true",
+                        help="ScaleBFM baseline on sim or Vive/bridges: skip residual actor loading and inference")
     parser.add_argument("--reference-bundle", default=None)
     parser.add_argument("--vive-config", default=None)
     parser.add_argument(
@@ -133,7 +137,7 @@ def main() -> int:
         raise ValueError("control_frequency_hz must be positive")
     if max_inference_time_s <= 0.0 or max_consecutive_slow_ticks < 1:
         raise ValueError("inference watchdog settings must be positive")
-    artifacts = resolve_artifacts(config_path, raw)
+    artifacts = resolve_artifacts(config_path, raw, include_residual=not args.scalebfm_only)
     if args.reference_bundle is not None:
         artifacts["reference_bundle"] = (
             Path(args.reference_bundle).expanduser().resolve()
@@ -143,7 +147,8 @@ def main() -> int:
         scalebfm_checkpoint=artifacts["scalebfm_checkpoint"],
         scalebfm_metadata=artifacts["scalebfm_metadata"],
         scalebfm_mode_table=artifacts["scalebfm_mode_table"],
-        residual_checkpoint=artifacts["residual_checkpoint"],
+        residual_checkpoint=artifacts.get("residual_checkpoint"),
+        residual_enabled=not args.scalebfm_only,
         reference_bundle=artifacts["reference_bundle"],
         kinematics_xml=artifacts["kinematics_xml"],
         device=device,
@@ -152,7 +157,7 @@ def main() -> int:
         future_step=int(raw.get("future_step", 5)),
         residual_scale=float(raw.get("residual_scale", 0.10)),
         start_frame=int(raw.get("start_frame", 1)),
-        reference_alignment=str(raw.get("reference_alignment", "xyyaw")),
+        reference_alignment=str(raw.get("reference_alignment", "none")),
         torch_num_threads=int(raw.get("torch_num_threads", 4)),
     )
     limits_path = resolve(config_path.parent, raw["joint_limits_source"])
@@ -179,7 +184,10 @@ def main() -> int:
         vive_path = None
     else:
         vive_path = resolve(config_path.parent, args.vive_config or raw["vive_config"])
-        provider = DualVivePoseProvider(DualViveDeploymentConfig.load(vive_path))
+        provider = DualVivePoseProvider(
+            DualViveDeploymentConfig.load(vive_path, require_object=not args.scalebfm_only),
+            require_object=not args.scalebfm_only,
+        )
         session_values = (raw["robot_a"], raw["robot_b"])
 
     control = shared_control_settings(raw)
@@ -192,6 +200,7 @@ def main() -> int:
     ) -> RobotSession:
         client = MotionBridgeClient(
             value["udp"],
+            require_bridge_session=args.pose_source == "vive",
             state_observer=(
                 provider.ingest_bridge_state
                 if observe_sim_pose and isinstance(provider, DualSimulationPoseProvider)
@@ -221,14 +230,18 @@ def main() -> int:
         session("b", session_values[1]),
         provider,
         policy,
-        loco_modes=tuple(LocoModePolicy(standing_assets, list(POLICY_JOINT_NAMES)) for _ in range(2)),
+        standing_policy=DualScaleBFMStanding(policy, load_default_command(standing_assets)),
         default_command=load_default_command(standing_assets),
         input_mode="sim" if args.pose_source == "sim" else "hardware",
         transition_ticks=default_ticks,
+        startup_timeout_s=float(
+            raw["simulation"].get("startup_timeout_s", 60.0)
+            if args.pose_source == "sim" else raw.get("state_startup_timeout_s", 10.0)
+        ),
         phase_target_delta=control["phase_target_delta"],
         require_button_release=control["require_button_release"],
         max_tilt_rad=control["max_tilt_rad"],
-        task_safety=control["task_safety"],
+        task_safety=None if args.scalebfm_only else control["task_safety"],
         enable_a=args.act_robot in {"a", "both"},
         enable_b=args.act_robot in {"b", "both"},
         state_timeout_s=float(raw.get("state_timeout_s", 0.2)),
@@ -253,7 +266,7 @@ def main() -> int:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
     )
     print(
-        f"dual ScaleBFM residual deploy: act_robot={args.act_robot} device={device} "
+        f"dual ScaleBFM deploy: policy_mode={'scalebfm_only' if args.scalebfm_only else 'scalebfm_residual'} act_robot={args.act_robot} device={device} "
         f"reference={artifacts['reference_bundle']}"
     )
     recorder = None
@@ -270,9 +283,12 @@ def main() -> int:
                 "effective_control": control,
                 "configuration": raw,
                 "reference": str(artifacts["reference_bundle"]),
-                "reference_alignment": str(raw.get("reference_alignment", "xyyaw")),
+                "reference_alignment": str(raw.get("reference_alignment", "none")),
                 "start_frame": int(raw.get("start_frame", 1)),
                 "pose_source": args.pose_source,
+                "standing_policy": "scalebfm_default_pose",
+                "object_enabled": not args.scalebfm_only,
+                "policy_mode": "scalebfm_only" if args.scalebfm_only else "scalebfm_residual",
                 "vive_config": None if vive_path is None else str(vive_path),
                 "device": device,
                 "act_robot": args.act_robot,
@@ -301,7 +317,7 @@ def main() -> int:
     try:
         provider.start()
         if args.pose_source == "vive" and not provider.wait_until_ready(10.0):
-            raise RuntimeError("three-Tracker Vive provider did not become ready")
+            raise RuntimeError("Vive provider did not become ready")
         period = 1.0 / control_hz
         start = time.monotonic()
         next_tick = start
@@ -331,7 +347,7 @@ def main() -> int:
                     f"frame={result.policy_step.frame} residual_max={residual_max:.3f} "
                     f"inference_ms={1000.0 * result.policy_step.inference_time_s:.2f}"
                 )
-            if result.reason != "simulation_snapshot_retry":
+            if result.reason not in {"simulation_snapshot_retry", "waiting_for_initial_inputs"}:
                 consecutive_slow_ticks = (
                     consecutive_slow_ticks + 1
                     if result.processing_time_s > max_inference_time_s

@@ -1,5 +1,20 @@
 # Dual G1 ScaleBFM Residual 实机部署
 
+> 当前双机默认采用世界系参考：`reference_alignment: none`。实际 A、B、箱子分别与各自 reference 世界系位姿比较；虚影不随实际 A 平移或旋转。旧的 A 锚定描述仅适用于显式选择 `xyyaw` 的历史配置。位置门限暂沿用 `preflight.max_partner_position_error_m`，现在同时检查 A 和 B。实测标定世界系需与 motion 世界系一致；本次不自动重定位参考、不放宽门限。
+
+> Bridge 常驻会话更新：更新 C++ bridge 后需重启 bridge **一次**。之后可以保持
+> `bash scripts/run_dual_bridges.sh` 运行，反复启动/退出 ScaleBFM deploy。
+> 每次 deploy 用新会话执行零增益握手，收到两路确认后才显示 ready；仍需重新按 Start。
+> 200 ms 断流保护保留。运行中锁存会让当前 deploy 报 `bridge_command_session_fault`；
+> 排除故障后重新运行 deploy 即可建立新会话，不会由延迟旧包自动恢复运动。
+> 旧 bridge 不支持握手时，实机入口会明确报 `bridge_session_protocol_missing`，
+> 需执行 `bash ../g1_sim2real/scripts/build.sh` 并重启 bridge。
+> 此恢复机制用于会话客户端；原 `src/deploy.py` 的旧协议保持兼容，但没有新增会话恢复能力。
+> 一个 bridge 已进入会话协议后不会接受旧协议客户端接管，切换回旧单机入口需重启 bridge。
+
+
+> 2026-09-06：双机 B 阶段现统一使用 **ScaleBFM 跟踪静态 DefaultPose**，任务完成后也回到该阶段；正式入口不再加载走路策略 `LocoMode.onnx`。启动命令不变，sim2sim 与实机共用实现。机制与最新验证见 [ScaleBFM 站立说明](DUAL_SCALEBFM_STANDING_ZH.md)。
+
 > 当前 `contact_v2_ctrl_2_8192` 候选包的完整启动命令、显式配置路径及已知问题，见 [双机 sim2sim 当前命令速查](DUAL_SIM2SIM_QUICK_REFERENCE_ZH.md)。
 
 本入口沿用已经通过 A-only、B-only、both 实机测试的双 namespace 和双
@@ -25,7 +40,7 @@ Dual_G1_MJ/results/ablation_collision_omnicontact_hand/
 
 默认 reference 是训练集第一条 `motion_000000.npz`。reference 必须是带 `training_*`
 字段的双机 bundle，并且必须与要执行的箱子尺寸和
-初始 A/B/箱子几何一致。任务几何条件在按 A 进入搬运策略前检查；DefaultPose/LocoMode 在此之前运行。
+初始 A/B/箱子几何一致。任务几何条件在按 A 进入搬运策略前检查；DefaultPose 过渡和 ScaleBFM 站立在此之前运行。
 
 ## 2. 配置三台 Tracker
 
@@ -57,6 +72,9 @@ uv run --extra vive python scripts/identify_vive_trackers.py
 
 确认后把三个固定的 `LHR-...` 序列号分别写入双机配置；不要使用可能在重连后变化的
 OpenVR index。按 `Ctrl-C` 结束实时显示。
+
+双机器人箱子世界系标定的完整命令（含摆放、备份、只计算、写入及预览）见
+[双机指令速查第 12 节](DUAL_SIM2SIM_QUICK_REFERENCE_ZH.md#12-双机器人用箱子标定公共世界系)。
 
 `calibrate_vive_world.py` 用 O/+X/+Y 三点建立公共世界坐标；
 `calibrate_vive_box_world.py` 可以用箱子 Tracker 建立/核查箱子坐标。两台机器人
@@ -206,8 +224,8 @@ bash scripts/run_dual_scalebfm_residual.sh \
 ```
 
 实机和仿真现在都等待人工门控：`ZERO TORQUE → Start/s → 两秒 DefaultPose
-过渡 → DefaultPose ready → B/b → LocoMode standing → A/a → ScaleBFM + residual
-→ reference 完成后回到 LocoMode → Stop/x`。Start/B/A 必须按顺序重新按下，启动时
+过渡 → DefaultPose ready → B/b → ScaleBFM DefaultPose standing → A/a → ScaleBFM + residual
+→ reference 完成后回到 ScaleBFM DefaultPose standing → Stop/x`。Start/B/A 必须按顺序重新按下，启动时
 已按住的键不会触发阶段切换；提前按 B 后需松开并在 ready 后重新按下。
 实机没有浮动基座锁定，应按实际支撑条件完成 DefaultPose 过渡和站立确认。
 四秒 `--duration` 示例只适合短时接口检查，包含等待按键时间，不会自动启动任务。
@@ -243,7 +261,7 @@ Tracker fail-closed 检查。
 
 ## 8. 双机器人 sim2sim：与单机一致的按键控制
 
-2026-09-05 站立修复：DefaultPose/LocoMode 使用与单机一致的关节目标限制流程，
+历史说明（2026-09-05，旧 LocoMode 路径）站立修复：DefaultPose/LocoMode 使用与单机一致的关节目标限制流程，
 实际力矩仍在每个 200 Hz 物理子步裁剪。`simulation.joint_dynamics_xml` 从单机
 `assets/g1_29dof.xml` 读取关节 armature、阻尼和摩擦，对整个仿真固定生效。
 保留双机碰撞几何，但不再声称与原训练 XML 的被动动力学完全相同。
@@ -255,8 +273,9 @@ Tracker fail-closed 检查。
 仿真两路端口为 `127.0.0.1:56001/56002` 和 `127.0.0.1:56101/56102`。
 
 先完成第 1 节策略产物准备；`config/g1/dual_policy_artifacts` 中必须有 manifest、
-模型、metadata、reference 和 FK 资源。LocoMode 使用现有
-`config/g1/omnicontact/LocoMode.onnx`，A/B 各自维护独立的循环网络状态。
+模型、metadata、reference 和 FK 资源。B 后复用任务的 ScaleBFM 模型，
+A/B 各自维护独立的站立观测历史；`standing_asset_dir` 仅提供 DefaultPose 和关节顺序配置，
+不再加载 `LocoMode.onnx`。
 
 一条命令启动 GUI 仿真和部署进程：
 
@@ -269,10 +288,10 @@ bash scripts/run_dual_scalebfm_sim2sim.sh
 
 1. 等待部署终端打印 `ZERO TORQUE`。两台机器人已在原版 DefaultPose，物理暂不推进。
 2. 按 `s`：两秒过渡到原版 DefaultPose，等待 `DefaultPose ready`，两个 floating base 和箱子保持锁定。
-3. 确认姿态稳定后按 `b`：两路同一状态帧的 LocoMode 命令到齐，才同步释放 base 和箱子。
-4. 等待 `LocoMode standing` 并确认两台机器人稳定，按 `a`：使用新鲜双机位姿做
+3. 确认姿态稳定后按 `b`：两路同一状态帧的 ScaleBFM 站立命令到齐，才同步释放 base 和箱子。
+4. 等待 `ScaleBFM DefaultPose standing` 并确认两台机器人稳定，按 `a`：使用新鲜双机位姿做
    reference 对齐、几何预检，随后运行搬箱策略。两台头顶的红色圆柱消失。
-5. reference 完成后自动回到两台独立的 LocoMode standing，继续站立，等待 `x`。
+5. reference 完成后自动回到 ScaleBFM DefaultPose standing，继续站立，等待 `x`。
 6. 按 `x`：对两台发送禁用阻尼命令并退出；一键脚本清理两个进程。终端 `Ctrl+C` 也可结束。
 
 提前按 `a` 或 `b` 不会跳过前置阶段；不再有自动进入搬箱的行为。完成后的 `a` 不会
@@ -309,7 +328,7 @@ bash scripts/run_dual_scalebfm_sim2sim.sh --headless
 收到相同按钮值。两条 PD 命令都必须确认同一状态时间戳、控制阶段和 reference 帧；
 阶段不一致会终止仿真，不会让一台先释放 base。每个 200 Hz 物理子步重新计算 PD 力矩。
 箱子误差检查只在搬箱执行阶段进行，比较的是控制器实际发出的 reference 帧及对齐后
-的箱子位置；等待 `s/b/a` 和结束后的 LocoMode 不消耗任务帧，也不触发搬箱误差检查。
+的箱子位置；等待 `s/b/a` 和结束后的 ScaleBFM 站立不消耗任务帧，也不触发搬箱误差检查。
 
 初始化布局仍来自双机 reference bundle：A/B 的全局 XY、朝向及箱子位姿来自
 `start_frame`；机器人关节改用原版 `DefaultPose.yaml`，pelvis 高度默认 `0.793 m`，
@@ -333,3 +352,14 @@ PYTHONPATH=src uv run --with pytest python -m pytest -q \
 测试通过不代表正式模型完成搬运。历史自动启动版本已记录默认 `best_agent.pt` 在箱子
 高度误差阈值上失败；该记录不能视为新交互流程的动力学验证。正式验收仍须补齐产物，
 按上述流程完成站立、搬箱和结束后站立的整段测试。
+
+## 纯 ScaleBFM 前置测试
+
+现有入口添加 `--scalebfm-only` 即可跳过 residual actor 的加载和推理。
+实机 Vive/双 bridge 和 sim2sim 共用该开关、状态机与控制路径。
+单元测试、两端完整启动命令及实际基线结果见
+[纯 ScaleBFM 基线测试说明](DUAL_SCALEBFM_ONLY_TEST_ZH.md)。
+
+2026-09-06 更新：`--scalebfm-only` 现在是空载模式，移除仿真箱体和箱子相关检查，
+实机只读取两台机器人 Tracker。分开启动时仿真器和部署器都需传该标志；一键脚本自动同步。
+详见 [空载 ScaleBFM 测试](DUAL_SCALEBFM_ONLY_TEST_ZH.md)。

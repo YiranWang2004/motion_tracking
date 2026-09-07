@@ -119,7 +119,7 @@ def test_dual_twin_loads_and_applies_independent_a_b_state():
         [1, 2, 0.8],
     )
     np.testing.assert_allclose(
-        model.geom_size[bindings.actual_box_geom, :3], [0.3, 0.15, 0.12]
+        model.geom_size[bindings.actual_box_geom, :3], [0.32, 0.14, 0.11]
     )
     apply_visualization(model, data, bindings, packet, ghost_mode="target")
     np.testing.assert_allclose(data.qpos[bindings.reference_joint_qpos], -0.3)
@@ -266,7 +266,7 @@ def test_direct_vive_owns_actual_poses_and_holds_each_tracker_independently():
         [[11, 2, 3], [14, 5, 6], [17, 8, 9]],
     )
     np.testing.assert_allclose(
-        model.geom_size[bindings.actual_box_geom, :3], [0.4, 0.2, 0.1]
+        model.geom_size[bindings.actual_box_geom, :3], [0.15, 0.5, 0.15]
     )
 
     held_b_pose = data.qpos[
@@ -413,3 +413,33 @@ def test_rollout_replay_reconstructs_reference_and_actual_state(tmp_path):
     np.testing.assert_allclose(
         packet["reference"]["robot_base_wxyz"][1, :3], [0, 1, 0.8]
     )
+
+
+def test_twin_default_and_explicit_bundle_box_dimensions(tmp_path):
+    from scripts.view_dual_scalebfm_residual import reference_box_half_extents
+    np.testing.assert_allclose(reference_box_half_extents(None), [.15, .5, .15])
+    path = tmp_path / 'motion.npz'
+    np.savez(path, fps=50)
+    np.testing.assert_allclose(reference_box_half_extents(str(path)), [.15, .5, .15])
+    np.savez(path, box_size=[.8, .4, .2])
+    np.testing.assert_allclose(reference_box_half_extents(str(path)), [.4, .2, .1])
+    np.savez(path, training_box_half_extents=[.6, .2, .1], box_size=[1, .3, .3])
+    np.testing.assert_allclose(reference_box_half_extents(str(path)), [.6, .2, .1])
+    np.savez(path, training_box_half_extents=[.5, -.15, .15])
+    import pytest
+    with pytest.raises(ValueError, match='positive 3-vector'):
+        reference_box_half_extents(str(path))
+
+
+def test_twin_hands_use_omnicontact_meshes_without_old_boxes():
+    model, _, _ = load_twin(ROOT / "config/g1/assets/dual_scalebfm_twin.xml")
+    for prefix in ("actual_a_", "actual_b_", "reference_a_", "reference_b_"):
+        for side in ("left", "right"):
+            wrist = model.body(f"{prefix}{side}_wrist_yaw_link").id
+            geoms = np.flatnonzero(model.geom_bodyid == wrist)
+            assert not np.any(model.geom_type[geoms] == mujoco.mjtGeom.mjGEOM_BOX)
+            for index in range(1, 17):
+                geom = model.geom(f"{prefix}{side}_hand_collision_{index:02d}").id
+                assert model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_MESH
+                mesh = model.mesh(int(model.geom_dataid[geom]))
+                assert mesh.name == f"{prefix}{side}_rubber_hand_col_{index:02d}"

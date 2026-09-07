@@ -111,15 +111,24 @@ def test_dual_physics_model_has_independent_robot_addresses():
         ).size
         for name in ("a_floating_base_joint", "b_floating_base_joint", "box_joint"):
             assert mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_JOINT, name) >= 0
+        assert sim.model.nexclude == 0
         for prefix in ("a_", "b_"):
+            collision_geoms = [
+                geom for geom in range(sim.model.ngeom)
+                if sim.model.body(sim.model.geom_bodyid[geom]).name.startswith(prefix)
+                and (sim.model.geom_contype[geom] or sim.model.geom_conaffinity[geom])
+            ]
+            assert len(collision_geoms) == 67
             for side in ("left", "right"):
-                assert (
-                    mujoco.mj_name2id(
-                        sim.model,
-                        mujoco.mjtObj.mjOBJ_GEOM,
-                        f"{prefix}{side}_hand_collision",
-                    )
-                    >= 0
+                hand_geoms = [
+                    sim.model.geom(f"{prefix}{side}_hand_collision_{index:02d}").id
+                    for index in range(1, 17)
+                ]
+                assert np.all(sim.model.geom_type[hand_geoms] == mujoco.mjtGeom.mjGEOM_MESH)
+                assert np.all(sim.model.geom_contype[hand_geoms] != 0)
+                np.testing.assert_allclose(
+                    sim.model.geom_friction[hand_geoms],
+                    np.tile([2.0, 0.01, 0.001], (16, 1)),
                 )
     finally:
         sim.close()
@@ -335,6 +344,7 @@ def test_waiting_ticks_do_not_advance_task_frame_or_termination():
 def test_keyboard_snapshot_is_atomic_across_robots_and_retries():
     sim = make_sim()
     try:
+        sim._snapshot_id = 1  # initial neutral handshake has completed
         sim.key_callback(ord("s"))
         sim.publish_state_pair(10)
         sim.key_callback(ord("b"))
@@ -398,5 +408,146 @@ def test_reference_box_dimensions_update_collision_and_inertia():
         mass = sim.model.body_mass[sim.box_body]
         np.testing.assert_allclose(sim.model.body_inertia[sim.box_body], mass / 3 * np.array([
             half[1]**2 + half[2]**2,half[0]**2 + half[2]**2,half[0]**2 + half[1]**2]))
+    finally:
+        sim.close()
+
+
+def test_scalebfm_only_removes_box_geometry_and_box_termination():
+    sim = DualScaleBFMSim2Sim(CONFIG, headless=True, scalebfm_only=True,
+                             transports=(FakeLowTransport(),FakeLowTransport()))
+    try:
+        assert mujoco.mj_name2id(sim.model,mujoco.mjtObj.mjOBJ_GEOM,'box_collision') == -1
+        assert sim.model.body_geomnum[sim.box_body] == 0
+        sim._phase = 'executing'
+        sim._command_reference_position = (10.,10.,10.)
+        assert sim.task_termination_reason() is None
+        assert sim.pose_payload()['object_enabled'] is False
+    finally:
+        sim.close()
+
+
+def test_early_keyboard_press_is_reported_and_not_latched(capsys):
+    sim = make_sim()
+    try:
+        sim.key_callback(ord('s'))
+        sim.publish_state_pair(10)
+        assert not sim.transports[0].states[-1]['buttons']['start']
+        assert 'ignored before initial control handshake' in capsys.readouterr().out
+        sim._snapshot_id += 1
+        sim.key_callback(ord('s'))
+        sim.publish_state_pair(20)
+        assert sim.transports[0].states[-1]['buttons']['start']
+    finally:
+        sim.close()
+
+
+@pytest.mark.parametrize('object_enabled', [True, False])
+def test_vive_initial_scene_preserves_full_pose_and_default_joints(object_enabled):
+    from omnicontact.contracts import RobotPose, ObjectPose
+    from dual_runtime.dual_pose_provider import DualPoseSnapshot
+    poses = [RobotPose(np.array([1., i*1.2, .91]), np.array([.1, .2, .3, .9]), time.monotonic())
+             for i in range(2)]
+    raw = yaml.safe_load(CONFIG.read_text())
+    extents = raw['simulation']['box_half_extents'] if object_enabled else [9., 9., 9.]
+    box = ObjectPose(np.array([1., .5, .25]), np.array([0., 0., .6, .8]), extents, time.monotonic())
+    scene = DualPoseSnapshot(*poses, box)
+    sim = DualScaleBFMSim2Sim(CONFIG, headless=True, transports=(FakeLowTransport(), FakeLowTransport()),
+                            scalebfm_only=not object_enabled, initial_scene=scene)
+    try:
+        default = load_default_command(Path(raw['control']['standing_asset_dir']))
+        for binding, pose, locked in zip(sim.bindings, poses, sim._initial_root_qpos):
+            expected = np.r_[pose.position_w, pose.quaternion_xyzw[[3,0,1,2]]]
+            np.testing.assert_allclose(sim.data.qpos[binding.root_qpos:binding.root_qpos+7], expected)
+            np.testing.assert_allclose(locked, expected)
+            np.testing.assert_allclose(sim.data.qpos[binding.joint_qpos], default.target_pos)
+        if object_enabled:
+            np.testing.assert_allclose(sim._initial_box_qpos, np.r_[box.position_w, box.quaternion_xyzw[[3,0,1,2]]])
+        # Mutating the source after capture cannot drive simulated free joints.
+        poses[0].position_w[:] = 100
+        assert sim.data.qpos[sim.bindings[0].root_qpos] == 1.
+        np.testing.assert_array_equal(sim.data.qvel, 0)
+    finally:
+        sim.close()
+
+
+def test_vive_scene_rejects_wrong_box_size():
+    from test_dual_scalebfm_deploy import fresh_snapshot
+    sim = make_sim()
+    try:
+        scene = fresh_snapshot()
+        scene.object.half_extents[:] = 9
+        with pytest.raises(ValueError, match='Vive box size'):
+            sim._initialize_from_scene(scene)
+    finally:
+        sim.close()
+
+
+def test_reference_ghost_preview_alignment_render_and_physics_independence():
+    sim = make_sim()
+    sim.raw["reference_alignment"] = "xyyaw"
+    try:
+        a = sim.bindings[0]
+        sim.data.qpos[a.root_qpos:a.root_qpos+3] += [2., -1., .1]
+        sim.data.qpos[a.root_qpos+3:a.root_qpos+7] = [np.sqrt(.5), 0, 0, np.sqrt(.5)]
+        before = sim.data.qpos.copy()
+        sim._update_reference_ghost()
+        np.testing.assert_allclose(sim._ghost_data.qpos[a.root_qpos:a.root_qpos+3],
+                                   sim.data.qpos[a.root_qpos:a.root_qpos+3], atol=1e-6)
+        b = sim.bindings[1]
+        # Raw B offset (0, 1.2, 0) rotates 90 degrees with robot A.
+        np.testing.assert_allclose(sim._ghost_data.qpos[b.root_qpos:b.root_qpos+3],
+                                   sim.data.qpos[a.root_qpos:a.root_qpos+3]+[-1.2,0,0], atol=1e-6)
+        scene = mujoco.MjvScene(sim.model, maxgeom=2000)
+        sim._draw_reference_ghost(scene)
+        assert scene.ngeom > 0
+        for geom in scene.geoms[:scene.ngeom]:
+            assert geom.rgba[3] == pytest.approx(.28)
+        np.testing.assert_array_equal(sim.data.qpos, before)
+        sim._ghost_alignment = sim._reference_preview_alignment()
+        fixed = sim._ghost_data.qpos.copy()
+        sim.data.qpos[a.root_qpos] += 1
+        sim._update_reference_ghost()
+        np.testing.assert_allclose(sim._ghost_data.qpos[b.root_qpos:b.root_qpos+7],
+                                   fixed[b.root_qpos:b.root_qpos+7])
+        sim.key_callback(ord('g'))
+        scene.ngeom = 0
+        sim._draw_reference_ghost(scene)
+        assert scene.ngeom == 0
+    finally:
+        sim.close()
+
+
+@pytest.mark.parametrize('only', [False, True])
+def test_reference_ghost_box_visibility_and_task_frame(only):
+    sim = DualScaleBFMSim2Sim(CONFIG, headless=True,
+        transports=(FakeLowTransport(), FakeLowTransport()), scalebfm_only=only)
+    try:
+        sim._ghost_joints[:, 2, :] = .12
+        sim._roots_released = True
+        sim.step_policy_interval(tuple(command(sim, i, enable=1, phase='executing', frame=2) for i in range(2)))
+        assert sim._ghost_alignment is not None
+        assert sim._ghost_frame == 2
+        scene = mujoco.MjvScene(sim.model, maxgeom=2000)
+        sim._draw_reference_ghost(scene)
+        for binding in sim.bindings:
+            np.testing.assert_allclose(sim._ghost_data.qpos[binding.joint_qpos], .12)
+        box_geoms = set(np.flatnonzero(sim.model.geom_bodyid == sim.box_body))
+        shown = {g.objid for g in scene.geoms[:scene.ngeom] if g.objtype == mujoco.mjtObj.mjOBJ_GEOM}
+        assert bool(box_geoms & shown) is (not only)
+    finally:
+        sim.close()
+
+
+def test_world_reference_ghost_does_not_follow_either_robot():
+    sim = make_sim()
+    try:
+        assert sim.raw['reference_alignment'] == 'none'
+        sim._update_reference_ghost()
+        expected = sim._ghost_data.qpos.copy()
+        for binding in sim.bindings:
+            sim.data.qpos[binding.root_qpos:binding.root_qpos+3] += [3., -2., .4]
+            sim.data.qpos[binding.root_qpos+3:binding.root_qpos+7] = [0.,0.,0.,1.]
+        sim._update_reference_ghost()
+        np.testing.assert_allclose(sim._ghost_data.qpos, expected)
     finally:
         sim.close()

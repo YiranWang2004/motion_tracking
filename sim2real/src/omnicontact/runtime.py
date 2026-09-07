@@ -10,6 +10,7 @@ from typing import Any, Callable
 import numpy as np
 
 from common.udp_transport import UDPRobotHigh
+from common.bridge_session import BridgeCommandSession
 from omnicontact.contracts import (
     ObjectPose,
     PDCommand,
@@ -131,8 +132,10 @@ class MotionBridgeClient:
         pose_sink: BridgePoseProvider | None = None,
         visualization_sender: VisualizationSender | None = None,
         state_observer: Callable[[dict[str, Any]], None] | None = None,
+        require_bridge_session: bool = False,
     ) -> None:
         self.transport = UDPRobotHigh(udp_config)
+        self.bridge_session = BridgeCommandSession(required=require_bridge_session)
         self.pose_sink = pose_sink
         self.visualization_sender = visualization_sender
         self.state_observer = state_observer
@@ -215,6 +218,20 @@ class MotionBridgeClient:
             packet_arrival_ns=int(packet.recv_time_ns),
         )
         self.latest_state = state
+        session = getattr(self, "bridge_session", None)
+        if session is not None:
+            was_ready = session.epoch is not None
+            begin = session.observe(data.get("bridge_control"))
+            if not was_ready and session.epoch is not None:
+                LOGGER.info("G1 bridge command session acknowledged: %s", session.session_id)
+            if begin is not None:
+                zeros = np.zeros(29, dtype=np.float32)
+                self.transport.send_command(
+                    q_des=zeros, qd_des=zeros, kp=zeros, kd=zeros, enable=0,
+                    extra_command={"bridge_session": begin},
+                    state_receive_time_ns=state.state_receive_time_ns,
+                )
+                return None
         return state
 
     def _publish_sim_pose(self, data: dict[str, Any]) -> None:
@@ -331,6 +348,9 @@ class MotionBridgeClient:
             extra_command = {"omnicontact_visualization": omni_visualization}
         if sim_control is not None:
             extra_command = dict(extra_command or {}, dual_sim_control=sim_control)
+        session = getattr(self, "bridge_session", None)
+        if session is not None:
+            extra_command = dict(extra_command or {}, **session.command_metadata())
         self.publish_visualization(visualization)
         attempt_ns = time.monotonic_ns()
         self.last_command_gap_ms = getattr(self, "last_command_gap_ms", 0.0)

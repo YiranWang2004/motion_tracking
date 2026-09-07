@@ -1,5 +1,7 @@
 # 双 G1 默认 motion 筛选与替换
 
+> 2026-09-06 默认动作更新：现已改为 `cfgen_box1m_lift_drop.npz`（430 帧），箱子半尺寸 `[0.5, 0.15, 0.15]`。下文 motion_000029 的筛选与闭环结果保留为历史，不是新默认动作的验证结果。
+
 2026-09-05：用户使用的 `config/g1/dual_scalebfm_contact_v2_8192.yaml` 默认
 reference 已由 `motion_000000.npz` 替换为 **`motion_000029.npz`**。
 

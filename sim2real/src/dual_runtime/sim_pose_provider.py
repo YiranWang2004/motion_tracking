@@ -20,6 +20,7 @@ class DualSimulationPoseProvider:
         self._snapshot: DualPoseSnapshot | None = None
         self._snapshot_id: int | None = None
         self.error: BaseException | None = None
+        self.object_enabled: bool | None = None
 
     def start(self) -> dict[str, Any]:
         return {}
@@ -42,6 +43,7 @@ class DualSimulationPoseProvider:
         if not isinstance(raw, dict):
             raise RuntimeError("simulation bridge state is missing dual_sim_pose")
         try:
+            self.object_enabled = raw.get("object_enabled")
             snapshot_id = int(raw["snapshot_id"])
             robots = raw["robots"]
             obj = raw["object"]

@@ -1,0 +1,16 @@
+{
+  "standing_policy": "scalebfm_default_pose",
+  "standing_ticks": 751,
+  "max_standing_tilt_deg": [
+    3.216984748840332,
+    3.216984748840332
+  ],
+  "final_standing_height_m": [
+    0.7868514657020569,
+    0.7868514657020569
+  ],
+  "standing_processing_p95_ms": 6.55229950643843,
+  "task_frames": [],
+  "final_state": "stopped",
+  "all_ticks_ok": true
+}
