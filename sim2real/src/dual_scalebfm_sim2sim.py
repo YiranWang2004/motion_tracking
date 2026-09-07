@@ -27,6 +27,7 @@ from dual_runtime.constants import POLICY_JOINT_NAMES
 from dual_runtime.reference import (_yaw_from_wxyz, _yaw_quaternion,
                                     quat_apply_batch, quat_mul_left_batch)
 from dual_runtime.sim_control import load_default_command
+from dual_runtime.viewer_overlays import draw_coordinate_frame, draw_robot_index
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -146,6 +147,8 @@ class DualScaleBFMSim2Sim:
         # Compile the candidate dimensions so collision bounds and inertia agree.
         spec = mujoco.MjSpec.from_file(str(xml_path))
         spec.geom("box_collision").size = self.box_half_extents.astype(np.float64)
+        # Keep the box frame visible through the simulated box.
+        spec.geom("box_collision").rgba[3] = 0.3
         box = spec.body("box")
         half = self.box_half_extents.astype(np.float64)
         box.inertia = box.mass / 3.0 * np.array([
@@ -791,10 +794,20 @@ class DualScaleBFMSim2Sim:
         with self._viewer.lock():
             scene = self._viewer.user_scn
             scene.ngeom = 0
+            draw_coordinate_frame(scene, np.zeros(3), np.eye(3),
+                                  length=0.45, radius=0.007, origin_radius=0.014)
+            if self.object_enabled:
+                draw_coordinate_frame(
+                    scene, self.data.xpos[self.box_body], self.data.xmat[self.box_body],
+                    length=0.28, radius=0.006, origin_radius=0.012)
+            for index, binding in enumerate(self.bindings):
+                draw_robot_index(scene, self.data.qpos[binding.root_qpos:binding.root_qpos + 3], index)
             self._draw_reference_ghost(scene)
             if self._task_started:
                 return
             for binding in self.bindings:
+                if scene.ngeom >= scene.maxgeom:
+                    break
                 position = self.data.qpos[
                     binding.root_qpos : binding.root_qpos + 3
                 ].copy()

@@ -75,6 +75,38 @@ def make_sim():
     return DualScaleBFMSim2Sim(CONFIG, headless=True, transports=transports)
 
 
+@pytest.mark.parametrize("only", [False, True])
+def test_viewer_frames_and_digits_follow_poses_through_task_start(only):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    sim = DualScaleBFMSim2Sim(CONFIG, headless=True,
+        transports=(FakeLowTransport(), FakeLowTransport()), scalebfm_only=only)
+    try:
+        scene = mujoco.MjvScene(sim.model, maxgeom=2000)
+        sim._viewer = SimpleNamespace(user_scn=scene, lock=nullcontext)
+        sim._ghost_visible = False
+        for started in (False, True):
+            sim._task_started = started
+            sim.data.qpos[sim.box_qpos:sim.box_qpos + 7] = [1, 2, 3, np.sqrt(.5), 0, 0, np.sqrt(.5)]
+            sim.data.qpos[sim.bindings[0].root_qpos] += .25
+            mujoco.mj_forward(sim.model, sim.data)
+            before = sim.data.qpos.copy()
+            sim._draw_status()
+            # Each frame uses an origin and three axes; digits use 8 + 5 strokes.
+            frames = 4 if only else 8
+            assert scene.ngeom == frames + 13 + (0 if started else 2)
+            np.testing.assert_allclose(scene.geoms[1].pos, [.225, 0, 0])
+            if not only:
+                np.testing.assert_allclose(scene.geoms[4].pos, [1, 2, 3])
+                np.testing.assert_allclose(scene.geoms[5].pos, [1, 2.14, 3])
+            root = sim.data.qpos[sim.bindings[0].root_qpos:sim.bindings[0].root_qpos + 3]
+            np.testing.assert_allclose(scene.geoms[frames].pos, root + [0, 0, 1.54])
+            np.testing.assert_array_equal(sim.data.qpos, before)
+    finally:
+        sim.close()
+
+
 def command(
     sim,
     robot_index,

@@ -289,8 +289,9 @@ uv run --extra vive python scripts/view_dual_scalebfm_residual.py --help
 - 当前所有启动命令必须显式选择本候选配置。
 - 双机使用 `--act-robot both`，不是单机 `--act`。
 - 双机使用 `--duration`，不是单机 `--run-seconds`。
-- 初始关节角来自原版 DefaultPose，任务布局来自双机 reference；当前不支持
-  `--initial-scene-source vive` 或 `--goal-position`，不会读取 Vive JSON 的 goal 来生成任务。
+- 初始关节角来自原版 DefaultPose，默认任务布局来自双机 reference；
+  `--initial-scene-source vive` 可一次性捕获实际布局，随后关闭实时追踪。
+  不会读取 Vive JSON 的 goal 来生成任务。
 - `--act-robot none` 仍发送禁用命令，释放 base 后仅施加阻尼，不是完全不发包的评估模式。
   无输出检查请使用第 4 节离线 validator。
 - 双机 ScaleBFM 站立与搬箱策略的控制门控已经实现；组件齐全和离线测试通过，
@@ -301,21 +302,47 @@ uv run --extra vive python scripts/view_dual_scalebfm_residual.py --help
 双机配置使用 `reference_alignment: motion_world`（兼容旧名称 `none`）。
 标定和任务摆放是两个独立阶段：
 
-1. 按下述命令标定一次固定世界系，保存 `world_from_steamvr` 和 Tracker→箱子安装外参。
-2. 标定完成后保持外参不变，将实物箱子和两台机器人摆到 NPZ 的 `start_frame` 位姿。
+1. 按下述命令借用箱子 Tracker 标定固定世界系，保存 `world_from_steamvr`、
+   原始采样 `box_world_calibration` 和轴对齐安装基准。
+2. 独立定义箱子固定局部轴映射，再确认实物箱子和两台机器人接近 NPZ 的 `start_frame` 位姿。
    当前 −90°参考要求箱子中心 `(0, 0, 0.15)` m、yaw `−90°`；
    箱子 +X 指向世界 −Y，箱子 +Y 指向世界 +X。
 3. 启动任务时读取 NPZ 的参考位姿，并与 Vive 实测位姿做启动预检。
-   位姿不匹配时应调整实物摆放，不能用参考值覆盖实测值。
+   位姿不匹配时先区分安装轴定义错误和实际摆放错误，不能用参考值覆盖实测值。
 
-标定命令中 yaw=0° 的摆放只用于定义世界系，之后允许移动箱子。
-不要在任务摆放后再次运行同一标定命令，否则新的箱子朝向又会被定义为世界 yaw=0°。
+标定命令的 yaw=0° 指轴对齐基准，不再强制真实箱子局部 X 与其一致。
+`object_frame_definition.box_local_z_quarter_turns` 独立指定固定的 90° 轴映射。
+不要用重新标定世界系来修复单个箱子的局部轴，否则两台机器人也会一起旋转。
 任务启动不会修改标定 JSON、不会自动平移/旋转参考；启动日志打印参考箱子的位置和 WXYZ 四元数。
 
 对应单机速查文档的“箱子上表面中心单点快速标定”。双机直接复用
 `calibrate_vive_box_world.py`，输入和输出改为 **`config/g1/omnicontact_vive_dual.json`**。
 两台机器人和箱子共用这一个 JSON 中的 `world_from_steamvr`，不要分别给 A/B 标定
 两个不同的世界系。该步骤用于实际 Vive 感知；纯 MuJoCo sim2sim 不读取这份标定。
+
+固定安装不变时，可离线设置箱子局部轴，无需移动箱子、连接 SteamVR 或重新标定世界：
+
+```bash
+uv run python scripts/set_vive_box_axes.py \
+  --vive-config config/g1/omnicontact_vive_dual.json \
+  --quarter-turns-z -1 \
+  --output config/g1/omnicontact_vive_dual.json
+```
+
+`-1` 表示在轴对齐基准右侧复合局部 Z 的 −90° 旋转。本次安装使用此映射；
+更换参考动作不会自动更改安装外参。重复运行是替换映射，不会累计旋转。
+世界变换、机器人外参和 tracker 坐标中的箱子中心偏移保持不变。
+`object_tracker_to_object` 保存最终组合结果，供现有 viewer、sim2sim、实机感知共同读取。
+
+有 `box_world_calibration.world_from_tracker_start` 时，以标定时 Tracker 的姿态
+求轴对齐安装基准，再复合固定 90° 映射；偏离名义 Rx(180°) 超过 10° 会拒绝当作微小修正。
+旧 JSON 没有原始采样时保留已有安装基准，不拿本次任务姿态补造标定信息。
+当前单点 solver 会将采样倾斜吸收到世界变换，所以它自身保存的标定姿态通常恰好
+等于名义姿态；单点采样不能独立区分世界倾斜、安装倾斜与实物倾斜。
+固定映射不会每帧归零实物运动，也不会将箱子中心强行放到参考原点。
+
+2026-09-08 失败日志的离线复算：固定 −90° 映射将箱子误差从 1.489 rad 降为
+约 0.0815 rad，首尾快照通过现有初始化几何阈值；这不代替完整仿真搬运验证。
 
 ### 12.1 准备与摆放
 

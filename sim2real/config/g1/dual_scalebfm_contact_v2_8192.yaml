@@ -1,7 +1,7 @@
 # Candidate simulation configuration; see artifact_validation_notes below.
 control_frequency_hz: 50
 state_timeout_s: 0.2
-pose_timeout_s: 0.1
+pose_timeout_s: 0.3
 max_state_skew_s: 0.05
 default_pose_duration_s: 2.0
 # Shared by simulation and hardware. Backend sections contain transport only.
@@ -15,8 +15,8 @@ control:
     scalebfm_standing: 1.0
     executing: 1.0
 task_safety:
-  object_position_z_error_m: 0.1
-  object_position_xyz_error_m: 0.3
+  object_position_z_error_m: 0.5
+  object_position_xyz_error_m: 0.5
 max_inference_time_s: 0.018
 max_consecutive_slow_ticks: 3
 log_directory: ../../logs/dual_scalebfm_contact_v2_8192

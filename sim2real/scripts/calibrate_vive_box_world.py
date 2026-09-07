@@ -7,11 +7,11 @@ pointing down and its X/Y axes parallel to the box edges.  The box center in
 the task world is supplied by the operator; the script then solves
 ``world_from_steamvr`` from one averaged OpenVR pose.
 
-The initial Tracker-to-box transform is intentionally a rough placeholder:
+The axis-aligned mounting base is intentionally a rough placeholder:
 the Tracker origin is assumed to be ``box_top_z - box_center_z`` above the
 box center, and the transform is a 180-degree rotation around X (xyzw
-quaternion ``[1, 0, 0, 0]``).  Refine this value in the deployment JSON after
-mechanical measurements are available.
+quaternion ``[1, 0, 0, 0]``). The independent fixed box-axis mapping is
+preserved on recalibration. Raw calibration poses are saved for auditing.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from calibrate_vive_world import capture_pose
+from set_vive_box_axes import configure_box_axes
 from omnicontact.perception.openvr_tracker import OpenVRTrackerReader
 from omnicontact.perception.vive_pose import RigidTransform
 
@@ -185,19 +186,41 @@ def main(argv: list[str] | None = None) -> int:
     print("\n=== box Tracker calibration ===")
     print("world_from_steamvr (^W T_S):")
     print(json.dumps(_transform_dict(world_from_steamvr), indent=2))
-    print("object_tracker_to_object placeholder (^T T_O):")
+    print("axis-aligned mounting base (before independent box-axis mapping):")
     print(json.dumps(_transform_dict(tracker_from_object), indent=2))
     print(
         "\nAssumption: Tracker +X is box +X, Tracker +Z points down, "
         "and box center is directly below the Tracker."
     )
 
-    if args.output is None:
-        return 0
-
-    output_path = Path(args.output).expanduser().resolve()
     config["world_from_steamvr"] = _transform_dict(world_from_steamvr)
+    # World calibration must not reset the independently chosen box axes.
+    # Retain the raw sample for auditing/recomputing small mounting corrections.
+    world_from_tracker = world_from_steamvr.compose(tracker_sample_transform)
+    config["box_world_calibration"] = {
+        "tracker_serial": serial,
+        "steamvr_from_tracker_start": _transform_dict(tracker_sample_transform),
+        "world_from_tracker_start": _transform_dict(world_from_tracker),
+        "box_center_world": list(args.box_center_world),
+        "box_top_z": args.box_top_z,
+        "valid_samples": capture.valid_samples,
+        "orientation_std_deg": capture.orientation_std_deg,
+    }
+    definition = config.get("object_frame_definition", {})
+    quarter_turns = definition.get("box_local_z_quarter_turns", 0)
+    config["object_frame_definition"] = {
+        "tracker_from_axis_aligned_box": _transform_dict(tracker_from_object),
+        "base_source": "box_world_calibration",
+    }
     config["object_tracker_to_object"] = _transform_dict(tracker_from_object)
+    configure_box_axes(config, quarter_turns)
+    print("Effective object_tracker_to_object (fixed axis mapping preserved):")
+    print(json.dumps(config["object_tracker_to_object"], indent=2))
+    if args.output is None:
+        print("Calibration record (not written):")
+        print(json.dumps(config["box_world_calibration"], indent=2))
+        return 0
+    output_path = Path(args.output).expanduser().resolve()
     _write_json(output_path, config)
     print(f"Wrote updated Vive config to {output_path}")
     if config.get("calibration_confirmed") is not True:

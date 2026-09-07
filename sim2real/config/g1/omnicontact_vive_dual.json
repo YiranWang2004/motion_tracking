@@ -5,15 +5,15 @@
   "object_tracker_serial": "LHR-FBB3FF7D",
   "world_from_steamvr": {
     "position_m": [
-      -1.0738818063667601,
-      1.969419046124884,
-      2.0850305454091123
+      -1.2000633825190938,
+      2.114937510004027,
+      2.062202960940284
     ],
     "quaternion_xyzw": [
-      0.11029646949664355,
-      -0.7016918705479235,
-      -0.6965590306596005,
-      0.10133471483203654
+      0.1342719999945273,
+      -0.69614480229583,
+      -0.6938199452698433,
+      0.12636189219745553
     ]
   },
   "robot_a_tracker_to_pelvis": {
@@ -49,14 +49,14 @@
       0.15
     ],
     "quaternion_xyzw": [
-      1.0,
-      0.0,
+      -0.7071067811865475,
+      -0.7071067811865476,
       0.0,
       0.0
     ]
   },
   "object_half_extents_m": [
-    0.15,
+    0.5,
     0.15,
     0.15
   ],
@@ -64,5 +64,59 @@
     0.0,
     1.0,
     0.15
-  ]
+  ],
+  "object_frame_definition": {
+    "tracker_from_axis_aligned_box": {
+      "position_m": [
+        0.0,
+        0.0,
+        0.15
+      ],
+      "quaternion_xyzw": [
+        1.0,
+        -1.3877787807814454e-17,
+        -0.0,
+        0.0
+      ]
+    },
+    "box_local_z_quarter_turns": -1,
+    "base_source": "box_world_calibration"
+  },
+  "box_world_calibration": {
+    "tracker_serial": "LHR-FBB3FF7D",
+    "steamvr_from_tracker_start": {
+      "position_m": [
+        -0.3339393530289332,
+        -1.7784788711865742,
+        -2.3966579818725586
+      ],
+      "quaternion_xyzw": [
+        -0.12636189219745553,
+        -0.6938199452698433,
+        0.69614480229583,
+        -0.1342719999945273
+      ]
+    },
+    "world_from_tracker_start": {
+      "position_m": [
+        0.0,
+        8.881784197001252e-16,
+        0.3000000000000007
+      ],
+      "quaternion_xyzw": [
+        -1.0,
+        1.3877787807814454e-17,
+        0.0,
+        0.0
+      ]
+    },
+    "box_center_world": [
+      0.0,
+      0.0,
+      0.15
+    ],
+    "box_top_z": 0.3,
+    "valid_samples": 150,
+    "orientation_std_deg": 0.020296245176118523
+  }
 }
