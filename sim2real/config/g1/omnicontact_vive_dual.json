@@ -1,19 +1,19 @@
 {
   "calibration_confirmed": true,
-  "robot_a_tracker_serial": "LHR-FBB3FF7D",
+  "robot_a_tracker_serial": "LHR-AFB66641",
   "robot_b_tracker_serial": "LHR-F0185780",
-  "object_tracker_serial": "LHR-AFB66641",
+  "object_tracker_serial": "LHR-FBB3FF7D",
   "world_from_steamvr": {
     "position_m": [
-      -1.1297402535668468,
-      -1.2548641889084873,
-      2.0797400254307146
+      -1.0738818063667601,
+      1.969419046124884,
+      2.0850305454091123
     ],
     "quaternion_xyzw": [
-      -0.5160303807875595,
-      0.4824785507328857,
-      0.49292008727378694,
-      -0.5078945577075452
+      0.11029646949664355,
+      -0.7016918705479235,
+      -0.6965590306596005,
+      0.10133471483203654
     ]
   },
   "robot_a_tracker_to_pelvis": {
