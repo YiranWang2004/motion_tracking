@@ -138,6 +138,9 @@ def main() -> int:
     if max_inference_time_s <= 0.0 or max_consecutive_slow_ticks < 1:
         raise ValueError("inference watchdog settings must be positive")
     artifacts = resolve_artifacts(config_path, raw, include_residual=not args.scalebfm_only)
+    manifest_path = resolve(resolve(config_path.parent, raw["artifacts"]["directory"]),
+                            raw["artifacts"]["manifest"])
+    checkpoint_contract = json.loads(manifest_path.read_text()).get("checkpoint_contract", {})
     if args.reference_bundle is not None:
         artifacts["reference_bundle"] = (
             Path(args.reference_bundle).expanduser().resolve()
@@ -159,6 +162,8 @@ def main() -> int:
         start_frame=int(raw.get("start_frame", 1)),
         reference_alignment=str(raw.get("reference_alignment", "none")),
         torch_num_threads=int(raw.get("torch_num_threads", 4)),
+        interaction_frame=checkpoint_contract.get("interaction_frame", "torso"),
+        anchor_angular_velocity_frame=checkpoint_contract.get("anchor_angular_velocity_frame", "world"),
     )
     initial_reference, _ = policy.reference.frame(policy.start_frame)
     print(
@@ -288,6 +293,7 @@ def main() -> int:
             {
                 "config": str(config_path),
                 "effective_control": control,
+                "checkpoint_contract": checkpoint_contract,
                 "configuration": raw,
                 "reference": str(artifacts["reference_bundle"]),
                 "reference_alignment": str(raw.get("reference_alignment", "none")),

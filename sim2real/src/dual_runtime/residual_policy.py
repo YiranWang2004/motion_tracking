@@ -101,3 +101,20 @@ class ResidualPolicy:
         if not torch.isfinite(action).all():
             raise RuntimeError("residual Actor produced non-finite output")
         return action.cpu().numpy().astype(np.float32)
+
+    def infer_agent(self, observation: np.ndarray, agent_index: int) -> np.ndarray:
+        """Run only the requesting robot's Actor and frozen scaler."""
+        if agent_index not in (0, 1):
+            raise ValueError("agent_index must be 0 or 1")
+        value = torch.as_tensor(observation, dtype=torch.float32,
+                                device=self.device).reshape(201)
+        if not torch.isfinite(value).all():
+            raise ValueError("residual observation contains non-finite values")
+        value = value.clamp(-100.0, 100.0)
+        normalized = ((value - self.means[agent_index]) /
+                      (torch.sqrt(self.variances[agent_index]) + 1.e-8)).clamp(-5., 5.)
+        with torch.inference_mode():
+            action = self.actors[agent_index](normalized).clamp(-1., 1.)
+        if not torch.isfinite(action).all():
+            raise RuntimeError("residual Actor produced non-finite output")
+        return action.cpu().numpy().astype(np.float32)

@@ -217,7 +217,7 @@ class ScaleBFMPolicy:
 
     def infer_batch(
         self,
-        histories: tuple[ScaleBFMHistory, ScaleBFMHistory],
+        histories: tuple[ScaleBFMHistory, ...],
         target_body_pos_w: np.ndarray,
         target_body_quat_wxyz: np.ndarray,
         live_body_pos_w: np.ndarray,
@@ -228,6 +228,9 @@ class ScaleBFMPolicy:
     ) -> tuple[np.ndarray, np.ndarray]:
         if not 0 <= int(control_mode) < 8:
             raise ValueError("control_mode must be in [0, 7]")
+        batch = len(histories)
+        if batch < 1:
+            raise ValueError("at least one ScaleBFM history is required")
         history_arrays = [history.arrays() for history in histories]
         root_quat, base_ang_vel, joint_pos, joint_vel, actions = (
             torch.as_tensor(
@@ -239,20 +242,20 @@ class ScaleBFMPolicy:
         )
         target_pos = torch.as_tensor(
             target_body_pos_w, dtype=torch.float32, device=self.device
-        ).reshape(2, 6, len(KEY_BODY_NAMES), 3)
+        ).reshape(batch, 6, len(KEY_BODY_NAMES), 3)
         target_quat = torch.as_tensor(
             target_body_quat_wxyz, dtype=torch.float32, device=self.device
-        ).reshape(2, 6, len(KEY_BODY_NAMES), 4)
+        ).reshape(batch, 6, len(KEY_BODY_NAMES), 4)
         live_pos = torch.as_tensor(
             live_body_pos_w, dtype=torch.float32, device=self.device
-        ).reshape(2, len(KEY_BODY_NAMES), 3)
+        ).reshape(batch, len(KEY_BODY_NAMES), 3)
         live_quat = torch.as_tensor(
             live_body_quat_wxyz, dtype=torch.float32, device=self.device
-        ).reshape(2, len(KEY_BODY_NAMES), 4)
+        ).reshape(batch, len(KEY_BODY_NAMES), 4)
         offsets = (
             torch.as_tensor(time_offsets, dtype=torch.float32, device=self.device)
             .reshape(1, 6, 1)
-            .expand(2, -1, -1)
+            .expand(batch, -1, -1)
         )
         tensors = (root_quat, base_ang_vel, joint_pos, joint_vel, actions)
         if not all(
@@ -289,7 +292,7 @@ class ScaleBFMPolicy:
             dim=-1,
         )
         modes = torch.full(
-            (2,), int(control_mode), dtype=torch.long, device=self.device
+            (batch,), int(control_mode), dtype=torch.long, device=self.device
         )
         task = task * self._mode_mapping_table[modes, None]
         mode_vector = self.mode_table[modes]

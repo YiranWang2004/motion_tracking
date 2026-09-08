@@ -549,6 +549,9 @@ dual-policy = [
     { name = "openvr" },
     { name = "torch" },
 ]
+onboard = [
+    { name = "torch" },
+]
 vive = [
     { name = "openvr" },
 ]
@@ -570,8 +573,9 @@ requires-dist = [
     { name = "scipy" },
     { name = "sshkeyboard" },
     { name = "torch", marker = "extra == 'dual-policy'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'onboard'", specifier = ">=2.4" },
 ]
-provides-extras = ["vive", "dual-policy"]
+provides-extras = ["vive", "dual-policy", "onboard"]
 
 [[package]]
 name = "h11"

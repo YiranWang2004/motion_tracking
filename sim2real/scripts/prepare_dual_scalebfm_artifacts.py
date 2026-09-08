@@ -90,7 +90,13 @@ def main() -> int:
         help="two-robot CFGen bundle (default: training motion_000000.npz)",
     )
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
+    parser.add_argument("--interaction-frame", choices=("torso", "pelvis"), default="torso",
+                        help="training observation convention; cannot be inferred from 201-D weights")
+    parser.add_argument("--anchor-angular-velocity-frame", choices=("world", "reference-anchor"), default="world",
+                        help="training reference angular velocity convention")
     args = parser.parse_args()
+    if args.interaction_frame == "pelvis" and args.residual_checkpoint is None:
+        parser.error("pelvis artifacts require an explicit newly trained --residual-checkpoint")
     source = Path(args.source_root).expanduser().resolve()
     reference = Path(args.reference_bundle).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
@@ -140,6 +146,9 @@ def main() -> int:
             "box_observation": "actual",
             "residual_joints": "whole-body",
             "residual_scale": 0.10,
+            "interaction_frame": args.interaction_frame,
+            "anchor_angular_velocity_frame": args.anchor_angular_velocity_frame,
+            "reference_anchor_body": "torso_link",
             "agents": checkpoint_details,
         },
         "files": files,

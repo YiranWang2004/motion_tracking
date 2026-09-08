@@ -1,0 +1,39 @@
+# Copy this identical configuration, calibration JSON and artifacts to A/B.
+# Replace the three example WLAN addresses before launching.
+policy_config: dual_scalebfm_contact_v2_8192.yaml
+artifact_directory: dual_policy_artifacts_pelvis
+vive_config: omnicontact_vive_dual.json
+cpu_affinity: []
+network:
+  host: 192.168.50.10
+  max_clock_rtt_s: 0.01
+  a:
+    host: 192.168.50.11
+    host_pose_port: 55300
+    pose_port: 55310
+    team_port: 55320
+    bridge_udp:
+      state_bind_host: 127.0.0.1
+      state_port: 55001
+      cmd_host: 127.0.0.1
+      cmd_port: 55002
+  b:
+    host: 192.168.50.12
+    host_pose_port: 55301
+    pose_port: 55310
+    team_port: 55320
+    bridge_udp:
+      state_bind_host: 127.0.0.1
+      state_port: 55001
+      cmd_host: 127.0.0.1
+      cmd_port: 55002
+runtime:
+  startup_timeout_s: 30.0
+  local_state_timeout_s: 0.06
+  pose_timeout_s: 0.10
+  peer_timeout_s: 0.12
+  start_delay_s: 0.75
+  max_frame_skew: 2
+  max_processing_s: 0.018
+  max_slow_ticks: 3
+  max_command_gap_s: 0.10

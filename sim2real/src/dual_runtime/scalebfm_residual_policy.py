@@ -12,7 +12,7 @@ from omnicontact.runtime import BridgeState
 
 from .dual_pose_provider import DualPoseSnapshot
 from .kinematics import G1PolicyKinematics, LiveKinematics
-from .observation import build_residual_observation
+from .observation import build_residual_observation, build_pelvis_residual_observation
 from .reference import DualReferenceBundle, ReferenceFrame
 from .residual_policy import ResidualPolicy
 from .scalebfm_policy import ScaleBFMHistory, ScaleBFMPolicy
@@ -58,7 +58,15 @@ class DualScaleBFMResidualPolicy:
         reference_alignment: str = "none",
         torch_num_threads: int | None = None,
         residual_enabled: bool = True,
+        interaction_frame: str = "torso",
+        anchor_angular_velocity_frame: str = "world",
     ) -> None:
+        if interaction_frame not in {"torso", "pelvis"}:
+            raise ValueError("unsupported interaction frame")
+        if anchor_angular_velocity_frame not in {"world", "reference-anchor"}:
+            raise ValueError("unsupported reference angular velocity frame")
+        self.interaction_frame = interaction_frame
+        self.anchor_angular_velocity_frame = anchor_angular_velocity_frame
         if not 5 <= int(future_step) <= 33:
             raise ValueError("future_step must be in [5, 33]")
         if residual_scale <= 0.0:
@@ -251,21 +259,40 @@ class DualScaleBFMResidualPolicy:
             references: tuple[ReferenceFrame, ReferenceFrame] = self.reference.frame(
                 self.frame
             )
-            observations = np.stack(
-                [
-                    build_residual_observation(
-                        state=states[index],
-                        reference=references[index],
-                        live=live[index],
-                        partner_live=live[1 - index],
-                        object_pose=snapshot.object,
-                        scalebfm_target=scalebfm_target[index],
-                        previous_residual=self.previous_residual[index],
-                        default_q=self.scalebfm.default_q,
-                    )
-                    for index in range(2)
-                ]
-            )
+            if self.interaction_frame == "pelvis":
+                poses = (snapshot.robot_a, snapshot.robot_b)
+                observations = np.stack([
+                    build_pelvis_residual_observation(
+                        state=states[index], reference=references[index],
+                        own_pelvis=poses[index], partner_pelvis=poses[1-index],
+                        object_pose=snapshot.object, scalebfm_target=scalebfm_target[index],
+                        previous_residual=self.previous_residual[index], default_q=self.default_q,
+                        anchor_angular_velocity_frame=self.anchor_angular_velocity_frame,
+                    ) for index in range(2)
+                ])
+            else:
+                if self.anchor_angular_velocity_frame == "reference-anchor":
+                    from dataclasses import replace
+                    from omnicontact.reference.math_wxyz import quat_rotate_inverse
+                    from .constants import ANCHOR_BODY_NAME, KEY_BODY_NAMES
+                    references = tuple(replace(r, anchor_ang_vel_w=quat_rotate_inverse(
+                        r.body_quat_wxyz[KEY_BODY_NAMES.index(ANCHOR_BODY_NAME)], r.anchor_ang_vel_w
+                    )) for r in references)
+                observations = np.stack(
+                    [
+                        build_residual_observation(
+                            state=states[index],
+                            reference=references[index],
+                            live=live[index],
+                            partner_live=live[1 - index],
+                            object_pose=snapshot.object,
+                            scalebfm_target=scalebfm_target[index],
+                            previous_residual=self.previous_residual[index],
+                            default_q=self.scalebfm.default_q,
+                        )
+                        for index in range(2)
+                    ]
+                )
             residuals = self.residual.infer(observations)
             targets = scalebfm_target + self.residual_scale * residuals
             self.previous_residual = residuals.copy()
