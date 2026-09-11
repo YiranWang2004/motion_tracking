@@ -14,7 +14,9 @@ import time
 
 import numpy as np
 
-from dual_runtime.onboard_config import load_yaml, resolve, sha256, load_artifacts, fingerprint
+from dual_runtime.onboard_config import (
+    load_yaml, load_onboard_config, channel_endpoints, resolve, sha256, load_artifacts, fingerprint,
+)
 from dual_runtime.onboard_network import LatestChannel, decode_pose
 from dual_runtime.onboard_policy import OnboardPolicy, OnboardStanding
 from dual_runtime.onboard_team import TeamState
@@ -46,7 +48,7 @@ def main():
     if args.duration is not None and args.duration <= 0:
         raise ValueError("duration must be positive")
     path = Path(args.config).expanduser().resolve()
-    config = load_yaml(path)
+    config = load_onboard_config(path)
     base_path = resolve(path.parent, config["policy_config"])
     raw = load_yaml(base_path)
     control = shared_control_settings(raw)
@@ -77,7 +79,8 @@ def main():
                             "default": standing_dir / "DefaultPose.yaml",
                             "joint_mapping": standing_dir / "OmniContact.yaml"},
                            dict(policy=raw, control=control, safety=safety, contract=contract,
-                                clock_rtt=net["max_clock_rtt_s"], actuation=args.actuate))
+                                clock_rtt=net["max_clock_rtt_s"], actuation=args.actuate,
+                                transport=net["transport"]))
     affinity = config.get("cpu_affinity", [])
     if affinity:
         os.sched_setaffinity(0, set(affinity))
@@ -94,7 +97,6 @@ def main():
     policy.warmup()
     limits = load_yaml(limits_path)
     local = net[args.robot]
-    other = net["b" if args.robot == "a" else "a"]
     udp = dict(local["bridge_udp"])
     for key in ("state_bind_host", "cmd_host"):
         if not ipaddress.ip_address(udp[key]).is_loopback:
@@ -122,10 +124,10 @@ def main():
     last_send = None
     last_report = 0.
     try:
-        pose_channel = LatestChannel((local["host"], local["pose_port"]),
-            (net["host"], local["host_pose_port"]), "pose", max_rtt_s=net["max_clock_rtt_s"])
-        peer_channel = LatestChannel((local["host"], local["team_port"]),
-            (other["host"], other["team_port"]), "team", max_rtt_s=net["max_clock_rtt_s"])
+        pose_channel = LatestChannel(*channel_endpoints(net, args.robot, "pose"),
+            "pose", max_rtt_s=net["max_clock_rtt_s"])
+        peer_channel = LatestChannel(*channel_endpoints(net, args.robot, "team"),
+            "team", max_rtt_s=net["max_clock_rtt_s"])
         robot = RobotSession(RobotSessionConfig(
             robot_id=args.robot, udp=udp,
             lower=np.asarray(limits["joint_pos_lowerlimit_lab"]),

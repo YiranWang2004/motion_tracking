@@ -404,6 +404,14 @@ def test_rollout_replay_reconstructs_reference_and_actual_state(tmp_path):
     assert clock.shift_speed(-1) == 0.5
     assert clock.restart(paused=False) == 0
     assert not clock.paused
+    assert clock.seek(1, now_s=100.0, paused=True) == 1
+    assert clock.update(now_s=200.0) == 1
+    assert clock.seek(0, now_s=200.0, paused=False) == 0
+    assert clock.update(now_s=200.05) == 1  # 0.5x speed, new time anchor
+    assert clock.seek(999, paused=True) == 2
+    assert clock.finished
+    assert clock.seek(-1) == 0
+    assert clock.paused and not clock.finished
     packet = replay.visualization_packet(2)
     assert packet["policy"]["frame"] == 2
     np.testing.assert_allclose(packet["policy"]["target_joint_pos"], 0.25)

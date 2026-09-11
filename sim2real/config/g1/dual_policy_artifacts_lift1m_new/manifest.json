@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "task": "dual_g1_scalebfm_residual_object",
+  "control_frequency_hz": 50,
+  "checkpoint_contract": {
+    "control_architecture": "decentralized",
+    "actor_sharing": "shared",
+    "actor_observation": "current",
+    "box_observation": "actual",
+    "residual_joints": "whole-body",
+    "residual_scale": 0.1,
+    "interaction_frame": "pelvis",
+    "anchor_angular_velocity_frame": "reference-anchor",
+    "reference_anchor_body": "torso_link",
+    "agents": {
+      "robot_0": {
+        "actor_input": [
+          512,
+          201
+        ],
+        "actor_output": [
+          29,
+          128
+        ],
+        "running_mean": [
+          201
+        ],
+        "running_variance": [
+          201
+        ]
+      },
+      "robot_1": {
+        "actor_input": [
+          512,
+          201
+        ],
+        "actor_output": [
+          29,
+          128
+        ],
+        "running_mean": [
+          201
+        ],
+        "running_variance": [
+          201
+        ]
+      }
+    }
+  },
+  "files": {
+    "scalebfm_model.pt": {
+      "sha256": "88d5a79946c03ed25503f48b2af71d16290844ef066ca9b6c8fa8dc3837422e3",
+      "bytes": 72856655,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/model_22200.pt"
+    },
+    "scalebfm_metadata.json": {
+      "sha256": "3024f18136314fade2676e22d6eafb1a8b2befa388da55b0885a53fcb1368d16",
+      "bytes": 7258,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/model_22200_metadata.json"
+    },
+    "scalebfm_mode_table.pt": {
+      "sha256": "fca11f2399bced32517b51c7f9dcf13c97117ca469b0b32e207d8f7d664fbde9",
+      "bytes": 2046,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/artifacts/scalebfm/mode_table.pt"
+    },
+    "residual_actor.pt": {
+      "sha256": "4f5a4d91c936b1747ba30b8210dd740065a36bc2fb2fa612d0dd0febc42577f5",
+      "bytes": 18729067,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/saved_checkpoints/lift1m_new/checkpoints/best_agent.pt"
+    },
+    "reference_bundle.npz": {
+      "sha256": "24c352ade876ff02b7885249eb955ded35e4c5c0a4ac2eee9fe2142da2215a77",
+      "bytes": 987979,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/results/cfgen_box1m_lift_drop_minus90.npz"
+    },
+    "g1_29dof_scalebfm.xml": {
+      "sha256": "2a8bace5933546b3e640793ec12de03db977c3d44dcbd20bc7ae3072803f0f2d",
+      "bytes": 14558,
+      "source": "/home/bcj/wyr/Dual_G1_MJ/src/dual_g1_mj/omnicontact/g1_29dof_kinematics.xml"
+    }
+  }
+}

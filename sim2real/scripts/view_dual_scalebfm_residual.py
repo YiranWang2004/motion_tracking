@@ -34,6 +34,7 @@ from omnicontact.perception.vive_pose import (  # noqa: E402
     sample_to_transform,
 )
 from omnicontact.replay import ReplayClock  # noqa: E402
+from omnicontact.replay_controls import ReplayControls  # noqa: E402
 from omnicontact.viewer_style import configure_camera  # noqa: E402
 
 
@@ -584,7 +585,11 @@ def main(argv: list[str] | None = None) -> int:
             clock.restart(paused=False)
 
     frame_period = 1.0 / args.fps
+    replay_controls = None
     try:
+        if clock is not None:
+            replay_controls = ReplayControls(clock)
+            print("Replay slider: drag to seek; frame numbers are zero-based.")
         if vive_reader is not None:
             devices = vive_reader.start()
             assert vive_config is not None
@@ -605,6 +610,8 @@ def main(argv: list[str] | None = None) -> int:
             configure_camera(viewer.cam, lookat=(0.8, 0.45, 0.8), distance=3.2)
             while viewer.is_running():
                 loop_start = time.monotonic()
+                if replay_controls is not None:
+                    replay_controls.update()
                 with viewer.lock():
                     if replay is not None:
                         assert clock is not None
@@ -747,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
                 if delay > 0.0:
                     time.sleep(delay)
     finally:
+        if replay_controls is not None:
+            replay_controls.close()
         if vive_reader is not None:
             vive_reader.stop()
         if visualization_receiver is not None:

@@ -1,5 +1,9 @@
 # 双 G1 本体 ScaleBFM Residual 部署
 
+本体推理支持无线直连和双有线 namespace 两种传输。本文的启动例子使用无线配置。
+如果本体没有无线网卡，请使用 [双有线本体部署流程](ONBOARD_WIRED_ZH.md)，
+通过现有 `g1a/g1b` 网卡分发 Vive；两种模式都在本体计算策略和关节控制。
+
 本入口用于 `Dual_G1_MJ` 的离线 `dual_g1_scalebfm_residual_object`
 任务：29 维 whole-body residual、201 维 current actor、actual box。
 每台本体独立执行自身 FK、batch=1 ScaleBFM 和自己的 residual Actor。

@@ -5,6 +5,7 @@ artifact_directory: dual_policy_artifacts_pelvis
 vive_config: omnicontact_vive_dual.json
 cpu_affinity: []
 network:
+  transport: wireless
   host: 192.168.50.10
   max_clock_rtt_s: 0.01
   a:

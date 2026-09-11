@@ -260,6 +260,20 @@ class ReplayClock:
             self._anchor_log_s = float(self.replay.elapsed_s[self.index])
             return self.index
 
+    def seek(
+        self, index: int, now_s: float | None = None, *, paused: bool | None = None
+    ) -> int:
+        """Seek to a frame, resetting the wall clock and optionally playback state."""
+        now = time.monotonic() if now_s is None else float(now_s)
+        with self._lock:
+            self.index = int(np.clip(index, 0, self.replay.frame_count - 1))
+            if paused is not None:
+                self.paused = bool(paused)
+            self.finished = self.index == self.replay.frame_count - 1
+            self._anchor_wall_s = now
+            self._anchor_log_s = float(self.replay.elapsed_s[self.index])
+            return self.index
+
     def restart(self, now_s: float | None = None, *, paused: bool = False) -> int:
         now = time.monotonic() if now_s is None else float(now_s)
         with self._lock:

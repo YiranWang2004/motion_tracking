@@ -15,13 +15,16 @@ import time
 
 import numpy as np
 import yaml
+import pytest
 
 from common.udp_transport import UDPRobotLow
-from dual_runtime.onboard_config import sha256
+from dual_runtime.onboard_config import sha256, channel_endpoints, load_onboard_config
 from dual_runtime.onboard_network import LatestChannel
+from dual_runtime.onboard_relay import namespace_relays, team_hub
 
 
-def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path):
+@pytest.mark.parametrize("transport", ["wireless", "wired_namespace"])
+def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transport):
     root = Path(__file__).resolve().parents[1]
     old = root / "config/g1/dual_policy_artifacts_contact_v2_8192"
     artifacts = tmp_path / "test_artifacts"
@@ -73,11 +76,23 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path):
             local["bridge_udp"][k] = new_port()
     for sock in reserved:
         sock.close()
+    config["network"]["transport"] = transport
+    if transport == "wired_namespace":
+        topology = {"robot_ip": "127.0.0.10"}
+        for i, side in enumerate(("a", "b")):
+            config["network"][side]["host"] = f"127.0.0.{10+i}"
+            topology[f"robot_{side}"] = dict(namespace=f"test_{side}",
+                robot_address=f"127.0.0.{20+i}/8", veth=dict(
+                    host_address=f"127.0.0.{40+i}/8", namespace_address=f"127.0.0.{30+i}/8"))
+        topology_path = tmp_path / "topology.yaml"
+        topology_path.write_text(yaml.safe_dump(topology))
+        config["network"]["wired_topology"] = str(topology_path)
     config_file = tmp_path / "onboard.yaml"
     config_file.write_text(yaml.safe_dump(config))
+    config = load_onboard_config(config_file)
     calibration_id = sha256(config["vive_config"])
     ports = config["network"]
-    channels, bridges, procs, outputs = [], [], [], []
+    channels, bridges, procs, outputs, relays = [], [], [], [], []
     buttons = [{}, {}]
     quit_event = threading.Event()
     publish_poses = threading.Event()
@@ -117,10 +132,13 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path):
 
     thread = None
     try:
+        if transport == "wired_namespace":
+            for side in ("a", "b"):
+                relays.extend(namespace_relays(ports, side))
+            relays.append(team_hub(ports))
         for side in ("a", "b"):
             local = ports[side]
-            channels.append(LatestChannel(("127.0.0.1", local["host_pose_port"]),
-                ("127.0.0.1", local["pose_port"]), "pose"))
+            channels.append(LatestChannel(*channel_endpoints(ports, side, "publisher"), "pose"))
             udp = local["bridge_udp"]
             bridges.append(UDPRobotLow(dict(state_host="127.0.0.1", state_port=udp["state_port"],
                 cmd_bind_host="127.0.0.1", cmd_port=udp["cmd_port"])))
@@ -174,5 +192,7 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path):
             bridge.close()
         for channel in channels:
             channel.close()
+        for relay in relays:
+            relay.close()
         for out in outputs:
             out.close()

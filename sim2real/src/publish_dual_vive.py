@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 import time
 
-from dual_runtime.onboard_config import load_yaml, resolve, sha256
+from dual_runtime.onboard_config import load_onboard_config, channel_endpoints, resolve, sha256
 from dual_runtime.onboard_network import LatestChannel, pose_payload
 from dual_runtime.vive_dual_pose import DualViveDeploymentConfig, DualVivePoseProvider
 
@@ -18,7 +18,7 @@ def main():
     if args.duration is not None and args.duration <= 0:
         parser.error("--duration must be positive")
     path = Path(args.config).expanduser().resolve()
-    config = load_yaml(path)
+    config = load_onboard_config(path)
     network = config["network"]
     calibration = resolve(path.parent, config["vive_config"])
     calibration_id = sha256(calibration)
@@ -28,10 +28,8 @@ def main():
     print(f"Vive calibration SHA256: {calibration_id}", flush=True)
     try:
         for side in ("a", "b"):
-            robot = network[side]
             channels.append(LatestChannel(
-                (network["host"], robot["host_pose_port"]),
-                (robot["host"], robot["pose_port"]), "pose",
+                *channel_endpoints(network, side, "publisher"), "pose",
                 max_rtt_s=float(network["max_clock_rtt_s"]),
             ))
         # One host acquisition stream shared by both destinations.
