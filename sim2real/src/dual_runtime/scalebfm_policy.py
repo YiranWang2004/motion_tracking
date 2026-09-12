@@ -201,6 +201,9 @@ class ScaleBFMPolicy:
     def _run_policy(
         self, prop: torch.Tensor, actions: torch.Tensor, task: torch.Tensor
     ) -> torch.Tensor:
+        accelerated = getattr(self, "accelerated_inference", None)
+        if accelerated is not None:
+            return accelerated(prop, actions, task)
         if self.inference_precision == "fp16":
             with torch.autocast(device_type="cuda", dtype=torch.float16):
                 return self.policy(prop, actions, task).float()

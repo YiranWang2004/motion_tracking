@@ -1,5 +1,7 @@
 # 双有线 namespace 下的 G1 本体推理
 
+已准备的横移、抬升任务配置和本体启动命令见 [两台本体任务清单](ONBOARD_INSTALLED_TASKS_ZH.md)。
+
 保留现有两块有线网卡和 `g1a/g1b` 隔离网络。每台本体运行自身的 C++ bridge、
 ScaleBFM 和 residual；主机只采集 Vive、分发位姿和中转协同消息。
 外接有线链路不传输关节角、关节速度、PD 参数、目标关节角或策略输出。
@@ -80,8 +82,13 @@ bash scripts/run_onboard_wired_relays.sh \
   --config config/g1/onboard_scalebfm_wired.yaml
 ```
 
-此命令检查现有网络，在 `g1a/g1b` 各启动一个轻量转发进程，并在默认 namespace
-启动 team hub。需要 sudo 进入 namespace，但不修改路由、NAT 或接口。
+此命令先在当前终端通过 sudo 提权监督进程，再检查现有网络，在 `g1a/g1b`
+各启动一个轻量转发进程，并在默认 namespace 启动 team hub（以原用户身份运行）。
+提权继续使用 uv 已选定的 Python 解释器；无需通过 sudo 运行 uv，也无需配置免密 sudo。
+子进程不再单独调用 sudo，避免新会话无法复用终端认证缓存而出现
+`sudo: a password is required`。监督进程退出时直接清理子进程组，不依赖 sudo 缓存有效期。
+需要 sudo 进入 namespace，但不修改路由、NAT 或接口。
+看到 `a`、`b`、`hub` 三条 `relay ready` 后，才表示三个转发进程都已完成初始化。
 任一转发进程退出会停止整个转发组。Ctrl-C 只停止转发，不删除 namespace。
 
 ### 4. 主机启动 Vive publisher
@@ -108,7 +115,10 @@ sudo ip netns exec g1b ssh -o HostKeyAlias=unitree-g1-b unitree@192.168.123.164
 下面命令在本体上执行，目录按本体实际仓库位置调整：
 
 ```bash
-# A/B 各自在 g1_sim2real/ 下运行一个 bridge
+# A 在 g1_sim2real/ 下运行 bridge（已检查本体接口名）
+G1_NET=enP8p1s0 bash scripts/run_onboard_bridge.sh
+
+# B 在 g1_sim2real/ 下运行 bridge
 G1_NET=eth0 bash scripts/run_onboard_bridge.sh
 
 # A 本体另一个终端，在 sim2real/ 下

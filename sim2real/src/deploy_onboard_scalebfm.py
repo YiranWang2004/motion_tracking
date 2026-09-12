@@ -12,6 +12,9 @@ import select
 import sys
 import time
 
+# Load PyTorch's OpenMP runtime before MuJoCo/other native libraries. On older
+# aarch64 glibc, loading it later can exhaust the static TLS block at startup.
+import torch  # noqa: F401
 import numpy as np
 
 from dual_runtime.onboard_config import (
@@ -80,7 +83,8 @@ def main():
                             "joint_mapping": standing_dir / "OmniContact.yaml"},
                            dict(policy=raw, control=control, safety=safety, contract=contract,
                                 clock_rtt=net["max_clock_rtt_s"], actuation=args.actuate,
-                                transport=net["transport"]))
+                                transport=net["transport"],
+                                acceleration_backend=config.get("acceleration", {}).get("backend", "pytorch")))
     affinity = config.get("cpu_affinity", [])
     if affinity:
         os.sched_setaffinity(0, set(affinity))
@@ -89,12 +93,31 @@ def main():
         inference_precision=raw.get("inference_precision", "fp32"),
         control_mode=int(raw["control_mode"]), future_step=int(raw["future_step"]),
         residual_scale=float(raw["residual_scale"]), start_frame=int(raw["start_frame"]),
-        reference_alignment="motion_world", torch_num_threads=int(raw.get("torch_num_threads", 4)),
+        reference_alignment="motion_world", torch_num_threads=int(
+            config.get("acceleration", {}).get("torch_num_threads", raw.get("torch_num_threads", 4))),
         anchor_angular_velocity_frame=contract["anchor_angular_velocity_frame"],
     )
     default = load_default_command(standing_dir)
     standing = OnboardStanding(policy, default)
-    policy.warmup()
+    acceleration = config.get("acceleration", {})
+    accelerated_backend = None
+    if acceleration.get("backend", "pytorch") == "tensorrt":
+        from dual_runtime.tensorrt_backend import attach_tensorrt
+        accelerated_backend = attach_tensorrt(policy,
+            resolve(path.parent, acceleration["directory"]), files, args.robot,
+            python=acceleration.get("python", "/usr/bin/python3"))
+    elif acceleration.get("backend", "pytorch") != "pytorch":
+        raise ValueError("unknown acceleration backend")
+    try:
+        if accelerated_backend is not None:
+            accelerated_backend.timeout_s = 5.
+        policy.warmup()
+        if accelerated_backend is not None:
+            accelerated_backend.timeout_s = .08
+    except BaseException:
+        if accelerated_backend is not None:
+            accelerated_backend.close()
+        raise
     limits = load_yaml(limits_path)
     local = net[args.robot]
     udp = dict(local["bridge_udp"])
@@ -137,6 +160,7 @@ def main():
             max_target_delta=control["phase_target_delta"]["default_pose"],
         ), client=MotionBridgeClient(udp, require_bridge_session=True))
         print(f"Onboard robot={args.robot} actuation={args.actuate} identity={identity}\n"
+              f"Inference backend: {'TensorRT/CUDA (local worker)' if accelerated_backend is not None else 'PyTorch'}\n"
               "Start/s → DefaultPose; B/b → standing; A/a → task; Stop/x → damping.\n"
               "Terminal keys require Enter; either robot remote can request a transition.", flush=True)
         deadline = time.monotonic()
@@ -290,6 +314,8 @@ def main():
         finally:
             if robot is not None:
                 robot.close()
+            if accelerated_backend is not None:
+                accelerated_backend.close()
             for channel in (pose_channel, peer_channel):
                 if channel is not None:
                     channel.close()

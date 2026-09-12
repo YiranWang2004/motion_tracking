@@ -1,0 +1,23 @@
+{
+  "robot": "b",
+  "task": "/home/unitree/wyr/motion_tracking/sim2real/config/g1/onboard_scalebfm_wired_lift.yaml",
+  "engine_runtime": "8.5.2.2",
+  "steps": 100,
+  "cpu_task": {
+    "median_ms": 42.769183999553206,
+    "p95_ms": 51.23106719993302,
+    "max_ms": 56.789791999108274
+  },
+  "tensorrt_task": {
+    "median_ms": 10.840640000424173,
+    "p95_ms": 12.281310399885115,
+    "max_ms": 12.907199999972363
+  },
+  "tensorrt_standing": {
+    "median_ms": 8.666096000524703,
+    "p95_ms": 9.223003199440427,
+    "max_ms": 9.7302079993824
+  },
+  "max_target_error_rad": 1.6689300537109375e-06,
+  "meets_18ms_max": true
+}

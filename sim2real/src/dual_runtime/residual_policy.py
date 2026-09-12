@@ -106,6 +106,11 @@ class ResidualPolicy:
         """Run only the requesting robot's Actor and frozen scaler."""
         if agent_index not in (0, 1):
             raise ValueError("agent_index must be 0 or 1")
+        accelerated = getattr(self, "accelerated_agent", None)
+        if accelerated is not None:
+            if agent_index != accelerated[0]:
+                raise ValueError("accelerated residual belongs to another robot")
+            return accelerated[1](observation)
         value = torch.as_tensor(observation, dtype=torch.float32,
                                 device=self.device).reshape(201)
         if not torch.isfinite(value).all():

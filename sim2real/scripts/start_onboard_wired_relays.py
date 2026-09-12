@@ -21,13 +21,19 @@ def main():
     net = load_onboard_config(path)["network"]
     if net["transport"] != "wired_namespace":
         parser.error("requires wired_namespace transport")
-    subprocess.run(["sudo", "-v"], check=True)
+    # Authenticate before creating detached process groups. sudo's default
+    # tty-scoped timestamp cannot be reused by sudo -n after setsid(). Keep
+    # the supervisor privileged so shutdown does not depend on a cached sudo
+    # timestamp either. Reuse the selected venv interpreter, not root's uv.
+    if os.geteuid() != 0:
+        os.execvp("sudo", ["sudo", "--", sys.executable, str(Path(__file__).resolve()),
+                           "--config", str(path)])
     topology = resolve(path.parent, net["wired_topology"])
-    subprocess.run(["sudo", "env", f"DUAL_NETWORK_CONFIG={topology}", "bash",
-                    str(ROOT / "scripts/setup_dual_network.sh"), "--check"], check=True)
+    subprocess.run(["bash", str(ROOT / "scripts/setup_dual_network.sh"), "--check"],
+                   env={**os.environ, "DUAL_NETWORK_CONFIG": str(topology)}, check=True)
     for side in ("a", "b"):
         namespace = net[side]["namespace"]
-        pids = subprocess.check_output(["sudo", "-n", "ip", "netns", "pids", namespace], text=True).split()
+        pids = subprocess.check_output(["ip", "netns", "pids", namespace], text=True).split()
         for pid in pids:
             try:
                 name = Path(f"/proc/{int(pid)}/comm").read_text().strip()
@@ -44,29 +50,38 @@ def main():
     children = []
     try:
         for side in ("a", "b", "hub"):
-            prefix = [] if side == "hub" else ["sudo", "-n", "ip", "netns", "exec", net[side]["namespace"]]
-            children.append(subprocess.Popen(prefix + [sys.executable,
+            prefix = [] if side == "hub" else ["ip", "netns", "exec", net[side]["namespace"]]
+            options = {}
+            if side == "hub" and "SUDO_UID" in os.environ:
+                options = dict(user=int(os.environ["SUDO_UID"]),
+                               group=int(os.environ["SUDO_GID"]), extra_groups=[])
+            child = subprocess.Popen(prefix + [sys.executable,
                 str(ROOT / "src/relay_onboard_network.py"), "--config", str(path), "--side", side],
-                start_new_session=True))
-        print("Wired onboard relays running. Keep this terminal open; Ctrl-C stops all relays.", flush=True)
+                start_new_session=True, **options)
+            children.append((side, child))
+        print("Starting wired onboard relays; wait for a, b and hub to report ready. "
+              "Keep this terminal open; Ctrl-C stops all relays.", flush=True)
         while not stop:
-            if any(child.poll() is not None for child in children):
-                raise RuntimeError("one onboard relay exited; stopping the group")
+            for side, child in children:
+                code = child.poll()
+                if code is not None:
+                    raise RuntimeError(f"onboard {side} relay exited (code {code}); stopping the group")
             time.sleep(.1)
     finally:
-        for child in children:
+        for _, child in children:
             if child.poll() is None:
                 try:
                     os.killpg(child.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
-                except PermissionError:
-                    subprocess.run(["sudo", "-n", "kill", "-TERM", "--", f"-{child.pid}"], check=False)
-        for child in children:
+        for _, child in children:
             try:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                subprocess.run(["sudo", "-n", "kill", "-KILL", "--", f"-{child.pid}"], check=False)
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
                 child.wait(timeout=5)
 
 
