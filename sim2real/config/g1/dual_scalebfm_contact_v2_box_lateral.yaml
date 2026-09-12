@@ -2,7 +2,7 @@
 # Training control settings still need confirmation; see artifact_validation_notes.
 control_frequency_hz: 50
 state_timeout_s: 0.2
-pose_timeout_s: 0.3
+pose_timeout_s: 0.5
 max_state_skew_s: 0.05
 default_pose_duration_s: 2.0
 # Shared by simulation and hardware. Backend sections contain transport only.

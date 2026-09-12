@@ -73,6 +73,7 @@ class RobotSession:
         self.last_state: BridgeState | None = None
         self.last_command: PDCommand | None = None
         self.last_enable = 0
+        self.last_command_diagnostics: dict[str, Any] = {}
 
     def read(self, timeout_s: float) -> BridgeState | None:
         state = self.client.read_next(timeout_s)
@@ -105,6 +106,7 @@ class RobotSession:
     ) -> PDCommand:
         if enable not in (0, 1):
             raise ValueError("enable must be 0 or 1")
+        requested_target = desired.target_pos.copy()
         if not enable:
             # The hardware bridge forwards PD gains even when enable=0.
             # Encode disabled operation explicitly, including true zero torque.
@@ -114,6 +116,15 @@ class RobotSession:
         if self.limiter.last_target is None:
             self.prepare(state)
         command = self.limiter.apply(desired)
+        diagnostics = {
+            "command_requested_target": requested_target,
+            "command_pre_limit_target": desired.target_pos.copy(),
+            "command_post_target_limit": command.target_pos.copy(),
+            "torque_limit_enabled": bool(limit_estimated_torque and self.config.torque_limit is not None),
+            "torque_limit_triggered": np.zeros(29, dtype=bool),
+            "estimated_torque_pre_limit": np.full(29, np.nan, dtype=np.float32),
+            "estimated_torque_clipped": np.full(29, np.nan, dtype=np.float32),
+        }
         kp = np.zeros(29) if command.kp is None else command.kp
         kd = np.zeros(29) if command.kd is None else command.kd
         if limit_estimated_torque and self.config.torque_limit is not None:
@@ -121,6 +132,9 @@ class RobotSession:
             limited = np.clip(
                 estimated, -self.config.torque_limit, self.config.torque_limit
             )
+            diagnostics["estimated_torque_pre_limit"] = estimated.copy()
+            diagnostics["estimated_torque_clipped"] = limited.copy()
+            diagnostics["torque_limit_triggered"] = np.abs(estimated) > self.config.torque_limit
             safe_target = command.target_pos.copy()
             active = kp > 1.0e-6
             safe_target[active] = (
@@ -136,6 +150,7 @@ class RobotSession:
         self.client.send(command, enable=enable, state=state, **kwargs)
         self.last_enable = enable
         self.last_command = command
+        self.last_command_diagnostics = diagnostics
         return command
 
     def send_hold(self, state: BridgeState, *, enable: int = 0) -> PDCommand:
@@ -145,6 +160,8 @@ class RobotSession:
         self.client.send(command, enable=enable, state=state)
         self.last_enable = enable
         self.last_command = command
+        # A fault/stop hold must not inherit diagnostics from the previous policy command.
+        self.last_command_diagnostics = {}
         return command
 
     def close(self) -> None:

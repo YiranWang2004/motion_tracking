@@ -18,6 +18,7 @@ class DualDeploymentRecorder:
         self.directory = Path(output_dir).expanduser().resolve() / stamp
         self.directory.mkdir(parents=True, exist_ok=False)
         self.metadata = dict(metadata)
+        self.metadata["command_diagnostics_schema_version"] = 1
         self.rows: list[dict[str, Any]] = []
 
     def record(self, coordinator, result) -> None:
@@ -33,6 +34,22 @@ class DualDeploymentRecorder:
             return
         step = result.policy_step
         commands = [robot.last_command for robot in coordinator.robots]
+        diagnostics = [getattr(robot, "last_command_diagnostics", {}) for robot in coordinator.robots]
+
+        def diagnostic_array(key, *, boolean=False):
+            return np.stack([
+                np.asarray(item.get(key, np.full(29, False if boolean else np.nan)),
+                           dtype=bool if boolean else np.float32).copy()
+                for item in diagnostics
+            ])
+
+        scalebfm_target = np.full((2, 29), np.nan, dtype=np.float32)
+        if step is not None:
+            scalebfm_target = step.scalebfm_targets
+        elif result.ok and result.reason == "scalebfm_default_pose_standing":
+            # Standing sends the raw ScaleBFM target directly to RobotSession.
+            # Capture it before disabled-robot substitution or either limiter.
+            scalebfm_target = diagnostic_array("command_requested_target")
         self.rows.append(
             {
                 "time_ns": time.monotonic_ns(),
@@ -46,6 +63,14 @@ class DualDeploymentRecorder:
                 "command_enable": [getattr(robot, "last_enable", 0) for robot in coordinator.robots],
                 "command_kp": np.stack([np.zeros(29) if command is None or command.kp is None else command.kp for command in commands]),
                 "command_kd": np.stack([np.zeros(29) if command is None or command.kd is None else command.kd for command in commands]),
+                "command_diagnostics_valid": [bool(item) for item in diagnostics],
+                "command_requested_target": diagnostic_array("command_requested_target"),
+                "command_pre_limit_target": diagnostic_array("command_pre_limit_target"),
+                "command_post_target_limit": diagnostic_array("command_post_target_limit"),
+                "torque_limit_enabled": [item.get("torque_limit_enabled", False) for item in diagnostics],
+                "torque_limit_triggered": diagnostic_array("torque_limit_triggered", boolean=True),
+                "estimated_torque_pre_limit": diagnostic_array("estimated_torque_pre_limit"),
+                "estimated_torque_clipped": diagnostic_array("estimated_torque_clipped"),
                 "q": np.stack([state.q_lab for state in states]),
                 "dq": np.stack([state.dq_lab for state in states]),
                 "imu_quat_wxyz": np.stack([state.quat_wxyz for state in states]),
@@ -68,9 +93,7 @@ class DualDeploymentRecorder:
                     ]
                 ),
                 "frame": -1 if step is None else step.frame,
-                "scalebfm_target": np.full((2, 29), np.nan, dtype=np.float32)
-                if step is None
-                else step.scalebfm_targets,
+                "scalebfm_target": scalebfm_target,
                 "residual": np.full((2, 29), np.nan, dtype=np.float32)
                 if step is None
                 else step.residuals,
