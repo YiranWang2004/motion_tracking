@@ -1,7 +1,9 @@
 import json
 import socket
+import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import mujoco
 import numpy as np
@@ -16,7 +18,7 @@ from dual_runtime.visualization import (
 )
 from dual_runtime.visualization_replay import DualScaleBFMReplay
 from dual_runtime.vive_dual_pose import DualViveDeploymentConfig
-from omnicontact.perception.openvr_tracker import ViveSample
+from omnicontact.perception.openvr_tracker import OpenVRTrackerReader, ViveSample
 from omnicontact.perception.vive_pose import RigidTransform
 from omnicontact.replay import ReplayClock
 from scripts.view_dual_scalebfm_residual import (
@@ -142,7 +144,11 @@ def test_dual_twin_uses_shared_omnicontact_visual_style():
         return int(result)
 
     np.testing.assert_allclose(
-        model.geom_rgba[bindings.actual_box_geom], [0.8, 0.6, 0.4, 1.0]
+        model.geom_rgba[bindings.actual_box_geom], [0.8, 0.6, 0.4, 0.35]
+    )
+    np.testing.assert_allclose(
+        [model.geom_rgba[geom_id(f"box_frame_axis_{axis}"), 3] for axis in "xyz"],
+        1.0,
     )
     np.testing.assert_allclose(
         model.geom_rgba[bindings.reference_box_geom], [0.9, 0.3, 0.0, 0.7]
@@ -310,6 +316,77 @@ def test_direct_vive_owns_actual_poses_and_holds_each_tracker_independently():
     )
 
 
+def test_direct_vive_hides_objects_until_their_tracker_has_a_valid_pose():
+    model, data, bindings = load_twin(
+        ROOT / "config/g1/assets/dual_scalebfm_twin.xml"
+    )
+    config = DualViveDeploymentConfig(
+        robot_a_tracker_serial="TRACKER_A",
+        robot_b_tracker_serial="TRACKER_B",
+        object_tracker_serial="TRACKER_OBJECT",
+        world_from_steamvr=RigidTransform([0, 0, 0], [0, 0, 0, 1]),
+        robot_a_tracker_to_pelvis=RigidTransform([0, 0, 0], [0, 0, 0, 1]),
+        robot_b_tracker_to_pelvis=RigidTransform([0, 0, 0], [0, 0, 0, 1]),
+        object_tracker_to_object=RigidTransform([0, 0, 0], [0, 0, 0, 1]),
+        object_half_extents_m=[0.4, 0.2, 0.1],
+        calibration_confirmed=True,
+    )
+    fresh = apply_vive_samples(
+        model,
+        data,
+        bindings,
+        config,
+        {
+            "TRACKER_A": None,
+            "TRACKER_B": None,
+            "TRACKER_OBJECT": _vive_sample([1, 2, 3]),
+        },
+        [None, None, None],
+    )
+    assert fresh == (False, False, True)
+    for alpha_by_geom in (
+        *bindings.actual_robot_alpha,
+        bindings.tracker_alpha[0],
+        bindings.tracker_alpha[1],
+    ):
+        np.testing.assert_allclose(
+            [model.geom_rgba[geom_id, 3] for geom_id in alpha_by_geom], 0.0
+        )
+    for alpha_by_geom in (bindings.actual_box_alpha, bindings.tracker_alpha[2]):
+        np.testing.assert_allclose(
+            [model.geom_rgba[geom_id, 3] for geom_id in alpha_by_geom],
+            list(alpha_by_geom.values()),
+        )
+
+
+def test_openvr_reader_can_start_with_only_a_subset_for_viewers(monkeypatch):
+    class FakeOpenVRError(Exception):
+        pass
+
+    vr_system = SimpleNamespace(
+        getTrackedDeviceClass=lambda index: 1 if index == 0 else 0,
+        getStringTrackedDeviceProperty=lambda index, prop: "TRACKER_OBJECT",
+    )
+    fake_openvr = SimpleNamespace(
+        VRApplication_Other=1,
+        TrackedDeviceClass_GenericTracker=1,
+        Prop_SerialNumber_String=2,
+        k_unMaxTrackedDeviceCount=4,
+        OpenVRError=FakeOpenVRError,
+        isRuntimeInstalled=lambda: True,
+        init=lambda application: vr_system,
+        shutdown=lambda: None,
+    )
+    monkeypatch.setitem(sys.modules, "openvr", fake_openvr)
+    reader = OpenVRTrackerReader(
+        ["TRACKER_A", "TRACKER_B", "TRACKER_OBJECT"], allow_partial=True
+    )
+    try:
+        assert reader.start() == {"TRACKER_OBJECT": 0}
+    finally:
+        reader.stop()
+
+
 def test_bridge_state_decoder_is_fail_closed():
     q = np.arange(29, dtype=np.float32)
     np.testing.assert_array_equal(decode_bridge_joint_state({"q": q}), q)
@@ -423,18 +500,18 @@ def test_rollout_replay_reconstructs_reference_and_actual_state(tmp_path):
     )
 
 
-def test_twin_default_and_explicit_bundle_box_dimensions(tmp_path):
+def test_explicit_bundle_box_dimensions_require_a_size_field(tmp_path):
     from scripts.view_dual_scalebfm_residual import reference_box_half_extents
-    np.testing.assert_allclose(reference_box_half_extents(None), [.15, .5, .15])
     path = tmp_path / 'motion.npz'
     np.savez(path, fps=50)
-    np.testing.assert_allclose(reference_box_half_extents(str(path)), [.15, .5, .15])
+    import pytest
+    with pytest.raises(ValueError, match='must contain'):
+        reference_box_half_extents(str(path))
     np.savez(path, box_size=[.8, .4, .2])
     np.testing.assert_allclose(reference_box_half_extents(str(path)), [.4, .2, .1])
     np.savez(path, training_box_half_extents=[.6, .2, .1], box_size=[1, .3, .3])
     np.testing.assert_allclose(reference_box_half_extents(str(path)), [.6, .2, .1])
     np.savez(path, training_box_half_extents=[.5, -.15, .15])
-    import pytest
     with pytest.raises(ValueError, match='positive 3-vector'):
         reference_box_half_extents(str(path))
 

@@ -446,17 +446,17 @@ viewer 不需要策略或 bridge 才能显示 Vive 位姿；没有 bridge 时关
 检查仅用于 LocoMode，不能用于包含俯身的 motion。启动命令不变。上次以该倾角退出
 推断 checkpoint 失效的结论撤回；验证情况见 [流程对齐说明](DUAL_SIM_REAL_ALIGNMENT_ZH.md)。
 
-## 双机只读孪生的默认箱子尺寸
+## 双机只读孪生的箱子尺寸来源
 
-`bash scripts/run_dual_scalebfm_viewer.sh` 默认显示全尺寸 **X=0.3、Y=1.0、Z=0.3 m**
-的长方体（MuJoCo 半尺寸 `[0.15, 0.5, 0.15]`）。初始箱体坐标轴与世界系对齐时，
-1 m 长边沿世界 Y 轴；收到实际位姿后仍随 Tracker 的箱体姿态旋转，不锁定世界朝向。Vive JSON 中的尺寸和实时 actual
-数据包尺寸不再覆盖孪生显示尺寸；Tracker 仍按既有标定外参更新位姿。
+实时模式默认从 `--vive-config` 指向的 JSON 读取 `object_half_extents_m`，不再在 viewer
+Python 代码中维护另一套默认尺寸。当前双机配置的半尺寸为 `[0.5, 0.15, 0.15]`，即
+全尺寸 **X=1.0、Y=0.3、Z=0.3 m**，长边沿箱体局部 X。实物显示框和参考框使用同一尺寸，
+实时 visualization 数据包不会再覆盖它。MJCF 中的 `size` 只为模型解析提供占位值，窗口
+打开前会被运行时尺寸覆盖。
 
-明确指定 CFGen bundle 时，读取 `training_box_half_extents`；没有此字段时读取
-全尺寸 `box_size` 并除以 2；两者都没有则保留默认尺寸。无显式 bundle 时，策略
-可视化数据中的 reference 尺寸会用于显示当前任务的箱体。实物显示框和参考框使用
-同一尺寸；这一显示规则也适用于日志回放。
+明确指定 CFGen bundle 时，它作为显式覆盖：优先读取 `training_box_half_extents`；没有此
+字段时读取全尺寸 `box_size` 并除以 2；两个字段都缺少时直接报错。离线 replay 在未显式
+指定 bundle 时使用 replay reference 自带的半尺寸，因此 replay 不依赖实机 Vive JSON。
 
 ```bash
 bash scripts/run_dual_scalebfm_viewer.sh \

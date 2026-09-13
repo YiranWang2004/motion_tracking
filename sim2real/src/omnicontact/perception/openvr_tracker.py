@@ -79,12 +79,23 @@ def _rotmat_to_quat(
 
 
 class OpenVRTrackerReader:
-    """Own one OpenVR session and read multiple GenericTracker devices."""
+    """Own one OpenVR session and read multiple GenericTracker devices.
 
-    def __init__(self, required_serials: Iterable[str] | None = None):
+    ``allow_partial`` is intended for diagnostic/viewer applications that can
+    operate with any subset of the configured trackers.  Runtime pose
+    providers keep the fail-closed default and still require every serial.
+    """
+
+    def __init__(
+        self,
+        required_serials: Iterable[str] | None = None,
+        *,
+        allow_partial: bool = False,
+    ):
         self.required_serials = tuple(required_serials or ())
         if len(set(self.required_serials)) != len(self.required_serials):
             raise ValueError("required_serials contains duplicates")
+        self.allow_partial = bool(allow_partial)
         self._openvr = None
         self._vr_system = None
         self._serial_to_index: dict[str, int] = {}
@@ -117,13 +128,13 @@ class OpenVRTrackerReader:
             self._vr_system = vr_system
         devices = self.refresh_devices()
         missing = [serial for serial in self.required_serials if serial not in devices]
-        if missing:
+        if missing and not self.allow_partial:
             self.stop()
             found = ", ".join(sorted(devices)) or "无"
             raise RuntimeError(
                 f"未找到指定 Vive Tracker: {', '.join(missing)}；当前发现: {found}"
             )
-        if not devices:
+        if not devices and not self.allow_partial:
             self.stop()
             raise RuntimeError("SteamVR 中没有 GenericTracker，请检查供电、Dongle 和配对")
         return devices
@@ -301,4 +312,3 @@ __all__ = [
     "write_vive_header",
     "write_vive_row",
 ]
-

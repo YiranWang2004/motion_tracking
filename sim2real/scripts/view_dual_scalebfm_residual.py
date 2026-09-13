@@ -38,20 +38,17 @@ from omnicontact.replay_controls import ReplayControls  # noqa: E402
 from omnicontact.viewer_style import configure_camera  # noqa: E402
 
 
-DEFAULT_BOX_HALF_EXTENTS = np.array([0.15, 0.5, 0.15], dtype=np.float64)
-
-
-def reference_box_half_extents(path: str | None) -> np.ndarray:
-    """Only explicit bundle dimensions override the one-metre display default."""
-    if path is None:
-        return DEFAULT_BOX_HALF_EXTENTS.copy()
+def reference_box_half_extents(path: str) -> np.ndarray:
+    """Read box half extents from an explicitly selected reference bundle."""
     with np.load(Path(path).expanduser(), allow_pickle=False) as bundle:
         if "training_box_half_extents" in bundle:
             value = np.asarray(bundle["training_box_half_extents"], dtype=np.float64)
         elif "box_size" in bundle:
             value = np.asarray(bundle["box_size"], dtype=np.float64) / 2.0
         else:
-            return DEFAULT_BOX_HALF_EXTENTS.copy()
+            raise ValueError(
+                "reference bundle must contain training_box_half_extents or box_size"
+            )
     if value.shape != (3,) or not np.all(np.isfinite(value)) or np.any(value <= 0):
         raise ValueError("bundle box dimensions must be a finite positive 3-vector")
     return value
@@ -68,6 +65,9 @@ class TwinBindings:
     actual_box_geom: int
     reference_box_geom: int
     tracker_mocap: np.ndarray
+    actual_robot_alpha: tuple[dict[int, float], dict[int, float]]
+    actual_box_alpha: dict[int, float]
+    tracker_alpha: tuple[dict[int, float], dict[int, float], dict[int, float]]
     reference_alpha: dict[int, float]
 
 
@@ -135,6 +135,16 @@ def build_bindings(model: mujoco.MjModel) -> TwinBindings:
             ],
             dtype=np.int32,
         ),
+        actual_robot_alpha=(
+            _robot_copy_alpha(model, "actual_a_"),
+            _robot_copy_alpha(model, "actual_b_"),
+        ),
+        actual_box_alpha=_body_subtree_alpha(model, "actual_box"),
+        tracker_alpha=(
+            _body_subtree_alpha(model, "tracker_a_marker"),
+            _body_subtree_alpha(model, "tracker_b_marker"),
+            _body_subtree_alpha(model, "tracker_object_marker"),
+        ),
         reference_alpha=_robot_copy_alpha(model, "reference_"),
     )
 
@@ -147,6 +157,19 @@ def _robot_copy_alpha(model: mujoco.MjModel, prefix: str) -> dict[int, float]:
         )
         if body_name is not None and body_name.startswith(prefix):
             result[geom_id] = float(model.geom_rgba[geom_id, 3])
+    return result
+
+
+def _body_subtree_alpha(model: mujoco.MjModel, root_name: str) -> dict[int, float]:
+    root_id = _object_id(model, mujoco.mjtObj.mjOBJ_BODY, root_name)
+    result: dict[int, float] = {}
+    for geom_id in range(model.ngeom):
+        body_id = int(model.geom_bodyid[geom_id])
+        while body_id > 0:
+            if body_id == root_id:
+                result[geom_id] = float(model.geom_rgba[geom_id, 3])
+                break
+            body_id = int(model.body_parentid[body_id])
     return result
 
 
@@ -202,6 +225,33 @@ def _set_reference_visibility(
 ) -> None:
     for geom_id, alpha in alpha_by_geom.items():
         model.geom_rgba[geom_id, 3] = alpha if visible else 0.0
+
+
+def _set_alpha_visibility(
+    model: mujoco.MjModel, alpha_by_geom: dict[int, float], visible: bool
+) -> None:
+    for geom_id, alpha in alpha_by_geom.items():
+        model.geom_rgba[geom_id, 3] = alpha if visible else 0.0
+
+
+def _set_vive_actual_visibility(
+    model: mujoco.MjModel,
+    bindings: TwinBindings,
+    available: tuple[bool, bool, bool],
+    *,
+    show_robots: bool = True,
+) -> None:
+    for index in range(2):
+        _set_alpha_visibility(
+            model,
+            bindings.actual_robot_alpha[index],
+            show_robots and available[index],
+        )
+    _set_alpha_visibility(model, bindings.actual_box_alpha, available[2])
+    for index in range(3):
+        _set_alpha_visibility(
+            model, bindings.tracker_alpha[index], available[index]
+        )
 
 
 def _set_actual_robot_visibility(model: mujoco.MjModel, visible: bool) -> None:
@@ -293,6 +343,8 @@ def apply_vive_samples(
     config: DualViveDeploymentConfig,
     samples: dict[str, ViveSample | None],
     last_tracker_transforms: list[RigidTransform | None],
+    *,
+    show_robots: bool = True,
 ) -> tuple[bool, bool, bool]:
     """Apply raw Tracker markers and calibrated actual poses independently."""
 
@@ -330,6 +382,13 @@ def apply_vive_samples(
             )
         else:
             _set_freejoint(data, bindings.actual_box_qpos, calibrated_pose)
+    available = tuple(transform is not None for transform in last_tracker_transforms)
+    _set_vive_actual_visibility(
+        model,
+        bindings,
+        available,
+        show_robots=show_robots,
+    )
     return fresh
 
 
@@ -385,10 +444,11 @@ def apply_visualization(
         _set_mocap(
             data, int(bindings.tracker_mocap[2]), actual["object_wxyz"]
         )
-    # The reference packet carries the active CFGen bundle dimensions. Vive
-    # config/actual packet dimensions must not replace the display default.
-    extents = (reference.get("box_half_extents", DEFAULT_BOX_HALF_EXTENTS)
-               if box_half_extents is None else box_half_extents)
+    extents = (
+        reference["box_half_extents"]
+        if box_half_extents is None
+        else box_half_extents
+    )
     model.geom_size[bindings.actual_box_geom, :3] = extents
     model.geom_size[bindings.reference_box_geom, :3] = extents
 
@@ -410,7 +470,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--vive-config",
         default=str(ROOT / "config/g1/omnicontact_vive_dual.json"),
-        help="three-Tracker calibration used by the direct live preview",
+        help=(
+            "dual Vive calibration; live mode also reads object_half_extents_m "
+            "from this file"
+        ),
     )
     parser.add_argument(
         "--no-vive",
@@ -460,18 +523,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     model, data, bindings = load_twin(args.xml_path)
-    initial_extents = reference_box_half_extents(args.reference_bundle)
-    explicit_extents = initial_extents if args.reference_bundle is not None else None
-    model.geom_size[bindings.actual_box_geom, :3] = initial_extents
-    model.geom_size[bindings.reference_box_geom, :3] = initial_extents
     initialize_default_pose(
         data, bindings, _load_default_pose(args.default_pose_config)
     )
     if args.no_robot:
         _set_actual_robot_visibility(model, False)
     _set_reference_visibility(model, bindings.reference_alpha, False)
-    mujoco.mj_forward(model, data)
     if args.check_model:
+        mujoco.mj_forward(model, data)
         print(
             f"dual ScaleBFM twin model OK: nq={model.nq} nv={model.nv} "
             f"bodies={model.nbody} geoms={model.ngeom} mocap={model.nmocap}"
@@ -484,9 +543,21 @@ def main(argv: list[str] | None = None) -> int:
     state_receivers: list[UDPLatestReceiver | None] = [None, None]
     vive_config = None
     vive_reader = None
+    display_box_half_extents: np.ndarray
+    box_size_source: str
     if args.replay_log is not None:
         replay = DualScaleBFMReplay(
             args.replay_log, reference_bundle=args.reference_bundle
+        )
+        display_box_half_extents = (
+            reference_box_half_extents(args.reference_bundle)
+            if args.reference_bundle is not None
+            else np.asarray(replay.reference.box_half_extents, dtype=np.float64).copy()
+        )
+        box_size_source = (
+            f"reference bundle {args.reference_bundle}"
+            if args.reference_bundle is not None
+            else "replay reference"
         )
         if args.replay_start_frame >= replay.frame_count:
             raise ValueError(
@@ -504,14 +575,28 @@ def main(argv: list[str] | None = None) -> int:
             f"duration={replay.duration_s:.3f}s speed={args.replay_speed:g}x"
         )
     else:
+        vive_config = DualViveDeploymentConfig.load(args.vive_config)
+        if args.reference_bundle is None:
+            display_box_half_extents = np.asarray(
+                vive_config.object_half_extents_m, dtype=np.float64
+            ).copy()
+            box_size_source = f"Vive config {args.vive_config}"
+        else:
+            display_box_half_extents = reference_box_half_extents(
+                args.reference_bundle
+            )
+            box_size_source = f"reference bundle {args.reference_bundle}"
         if not args.no_vive:
-            vive_config = DualViveDeploymentConfig.load(args.vive_config)
             vive_reader = OpenVRTrackerReader(
                 (
                     vive_config.robot_a_tracker_serial,
                     vive_config.robot_b_tracker_serial,
                     vive_config.object_tracker_serial,
-                )
+                ),
+                allow_partial=True,
+            )
+            _set_vive_actual_visibility(
+                model, bindings, (False, False, False), show_robots=not args.no_robot
             )
         visualization_receiver = DualVisualizationReceiver(
             args.visualization_host, args.visualization_port
@@ -532,6 +617,13 @@ def main(argv: list[str] | None = None) -> int:
             f"B={args.state_host_b}:{args.state_port_b} "
             f"visualization={args.visualization_host}:{args.visualization_port}"
         )
+    model.geom_size[bindings.actual_box_geom, :3] = display_box_half_extents
+    model.geom_size[bindings.reference_box_geom, :3] = display_box_half_extents
+    mujoco.mj_forward(model, data)
+    print(
+        "Box half extents XYZ: "
+        f"{display_box_half_extents.tolist()} source={box_size_source}"
+    )
     print(
         "Native G1 materials: measured A/B. Transparent yellow/orange: A/B ghost. "
         "Brown/orange boxes: measured/reference."
@@ -599,7 +691,18 @@ def main(argv: list[str] | None = None) -> int:
                 f"B={vive_config.robot_b_tracker_serial} "
                 f"object={vive_config.object_tracker_serial}"
             )
-            print(f"Detected trackers: {', '.join(sorted(devices))}")
+            configured = (
+                vive_config.robot_a_tracker_serial,
+                vive_config.robot_b_tracker_serial,
+                vive_config.object_tracker_serial,
+            )
+            missing = [serial for serial in configured if serial not in devices]
+            print(f"Detected trackers: {', '.join(sorted(devices)) or 'none'}")
+            if missing:
+                print(
+                    "Waiting for configured trackers (their objects stay hidden): "
+                    + ", ".join(missing)
+                )
         with mujoco.viewer.launch_passive(
             model,
             data,
@@ -624,7 +727,7 @@ def main(argv: list[str] | None = None) -> int:
                                 bindings,
                                 packet,
                                 ghost_mode=ghost_mode[0],
-                                box_half_extents=explicit_extents,
+                                box_half_extents=display_box_half_extents,
                             )
                             for robot_index in range(2):
                                 apply_bridge_joint_state(
@@ -654,6 +757,7 @@ def main(argv: list[str] | None = None) -> int:
                                 vive_config,
                                 samples,
                                 last_tracker_transforms,
+                                show_robots=not args.no_robot,
                             )
                             tracker_now = time.monotonic()
                             for index, is_fresh in enumerate(fresh):
@@ -672,7 +776,7 @@ def main(argv: list[str] | None = None) -> int:
                                 bindings,
                                 visual.data,
                                 ghost_mode=ghost_mode[0],
-                                box_half_extents=explicit_extents,
+                                box_half_extents=display_box_half_extents,
                                 apply_actual=vive_reader is None,
                                 apply_tracker_markers=vive_reader is None,
                             )
