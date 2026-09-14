@@ -552,6 +552,9 @@ dual-policy = [
 onboard = [
     { name = "torch" },
 ]
+scalebfm = [
+    { name = "torch" },
+]
 vive = [
     { name = "openvr" },
 ]
@@ -574,8 +577,9 @@ requires-dist = [
     { name = "sshkeyboard" },
     { name = "torch", marker = "extra == 'dual-policy'", specifier = ">=2.4" },
     { name = "torch", marker = "extra == 'onboard'", specifier = ">=2.4" },
+    { name = "torch", marker = "extra == 'scalebfm'", specifier = ">=2.4" },
 ]
-provides-extras = ["vive", "dual-policy", "onboard"]
+provides-extras = ["scalebfm", "vive", "dual-policy", "onboard"]
 
 [[package]]
 name = "h11"

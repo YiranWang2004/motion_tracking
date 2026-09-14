@@ -1,0 +1,23 @@
+# Independent single-G1 runtime. Paths resolve relative to this YAML.
+schema: 1
+artifacts: dual_policy_artifacts_lift1m_new
+pose_mode: local
+pico_host: 127.0.0.1
+vive_endpoint: tcp://127.0.0.1:28710
+udp:
+  state_bind_host: 0.0.0.0
+  state_port: 55001
+  cmd_host: 127.0.0.1
+  cmd_port: 55002
+control_mode: 7
+time_offsets: [0, 1, 2, 3, 4, 5]
+state_timeout_s: 0.10
+source_timeout_s: 0.25
+compute_timeout_s: 0.08
+max_target_delta: 0.06
+stand_s: 3.0
+max_tilt_rad: 0.65
+local_odometry:
+  sole_height: 0.03
+  contact_height: 0.04
+  max_speed: 2.0

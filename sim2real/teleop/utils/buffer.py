@@ -295,6 +295,7 @@ class SharedRetargetFrameRingBuffer:
                     used_fallback=True,
                     info={
                         "mode": "fallback_latest",
+                        "sample_time_ns": latest_ns,
                         "buffer_len": size,
                     },
                 )
@@ -319,6 +320,7 @@ class SharedRetargetFrameRingBuffer:
                         used_fallback=False,
                         info={
                             "mode": "interpolate",
+                            "sample_time_ns": int(target_ns),
                             "buffer_len": size,
                         },
                     )
@@ -331,6 +333,7 @@ class SharedRetargetFrameRingBuffer:
                 used_fallback=True,
                 info={
                     "mode": "fallback_latest",
+                    "sample_time_ns": latest_ns,
                     "buffer_len": size,
                 },
             )
