@@ -147,8 +147,8 @@ class DualScaleBFMSim2Sim:
         # Compile the candidate dimensions so collision bounds and inertia agree.
         spec = mujoco.MjSpec.from_file(str(xml_path))
         spec.geom("box_collision").size = self.box_half_extents.astype(np.float64)
-        # Keep the box frame visible through the simulated box.
         spec.geom("box_collision").rgba[3] = 0.3
+        self._transparent_box_rgba = np.array(spec.geom("box_collision").rgba, copy=True)
         box = spec.body("box")
         half = self.box_half_extents.astype(np.float64)
         box.inertia = box.mass / 3.0 * np.array([
@@ -160,6 +160,9 @@ class DualScaleBFMSim2Sim:
             spec.delete(spec.geom("box_collision"))
             box.gravcomp = 1.0
         self.model = spec.compile()
+        self._box_visual_geom = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "box_collision"
+        )
         self.model.opt.timestep = 1.0 / self.physical_hz
         self.data = mujoco.MjData(self.model)
         self.bindings = (self._bind_robot("a_"), self._bind_robot("b_"))
@@ -213,6 +216,8 @@ class DualScaleBFMSim2Sim:
         mujoco.mj_forward(self.model, self.data)
         self._ghost_data = mujoco.MjData(self.model)
         self._ghost_visible = True
+        self._frames_visible = True
+        self._paused = False
         self._ghost_alignment = None
         self._ghost_frame = self.start_frame
         self._phase = "zero_torque"
@@ -528,6 +533,15 @@ class DualScaleBFMSim2Sim:
 
     def key_callback(self, keycode: int) -> None:
         key = chr(keycode).lower()
+        if key == "c":
+            self._frames_visible = not self._frames_visible
+            mode = "frames on + translucent box" if self._frames_visible else "frames off + opaque yellow box"
+            print(f"[sim2sim] {mode}", flush=True)
+            return
+        if key == " ":
+            self._paused = not self._paused
+            print(f"[sim2sim] {'paused' if self._paused else 'resumed'}", flush=True)
+            return
         if key == "g":
             self._ghost_visible = not self._ghost_visible
             print(f"[sim2sim] reference ghosts {'on' if self._ghost_visible else 'off'}", flush=True)
@@ -541,6 +555,7 @@ class DualScaleBFMSim2Sim:
             with self._key_lock:
                 # Stop cannot be delayed behind a queued startup sequence.
                 if button == "stop":
+                    self._paused = False
                     self._key_queue.clear()
                 self._key_queue.append(button)
 
@@ -688,6 +703,19 @@ class DualScaleBFMSim2Sim:
                 self.data.qvel[self.box_dof : self.box_dof + 6] = 0.0
                 mujoco.mj_forward(self.model, self.data)
 
+    def _wait_while_paused(self, state_time_ns: int) -> bool:
+        # Reuse the source timestamp and button snapshot: the coordinator resends
+        # cached commands without advancing reference frames or policy state.
+        while self._alive and self._paused:
+            if self._viewer is not None:
+                if not self._viewer.is_running():
+                    return False
+                self._draw_status()
+                self._viewer.sync()
+            self.publish_state_pair(state_time_ns)
+            time.sleep(min(self.command_retry_s, 0.02))
+        return self._alive
+
     def _run_loop(self, max_policy_steps: int | None) -> None:
         steps = 0
         while self._alive and (max_policy_steps is None or steps < max_policy_steps):
@@ -697,6 +725,8 @@ class DualScaleBFMSim2Sim:
             self.publish_state_pair(state_time_ns)
             commands = self.wait_for_command_pair(state_time_ns)
             if commands is None:
+                break
+            if not self._wait_while_paused(state_time_ns):
                 break
             self.step_policy_interval(commands)
             if self._phase == "stopped":
@@ -792,14 +822,24 @@ class DualScaleBFMSim2Sim:
 
     def _draw_status(self) -> None:
         with self._viewer.lock():
+            # Native viewer C also toggles contact points. Our C binding controls
+            # box/axes appearance, so suppress the viewer's contact markers.
+            if hasattr(self._viewer, "opt"):
+                self._viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = False
+            if self._box_visual_geom >= 0:
+                self.model.geom_rgba[self._box_visual_geom] = (
+                    self._transparent_box_rgba if self._frames_visible
+                    else [0.8, 0.6, 0.4, 1.0]  # Match dual_scalebfm_twin.xml actual_box_geom.
+                )
             scene = self._viewer.user_scn
             scene.ngeom = 0
-            draw_coordinate_frame(scene, np.zeros(3), np.eye(3),
-                                  length=0.45, radius=0.007, origin_radius=0.014)
-            if self.object_enabled:
-                draw_coordinate_frame(
-                    scene, self.data.xpos[self.box_body], self.data.xmat[self.box_body],
-                    length=0.28, radius=0.006, origin_radius=0.012)
+            if self._frames_visible:
+                draw_coordinate_frame(scene, np.zeros(3), np.eye(3),
+                                      length=0.45, radius=0.007, origin_radius=0.014)
+                if self.object_enabled:
+                    draw_coordinate_frame(
+                        scene, self.data.xpos[self.box_body], self.data.xmat[self.box_body],
+                        length=0.28, radius=0.006, origin_radius=0.012)
             for index, binding in enumerate(self.bindings):
                 draw_robot_index(scene, self.data.qpos[binding.root_qpos:binding.root_qpos + 3], index)
             self._draw_reference_ghost(scene)
@@ -827,7 +867,7 @@ class DualScaleBFMSim2Sim:
             f"dual ScaleBFM sim2sim: physics={self.physical_hz} Hz "
             f"policy={self.policy_hz:g} Hz decimation={self.decimation}"
         )
-        print("Controls: s → DefaultPose; b → ScaleBFM DefaultPose standing; a → task; x → stop; g → reference ghosts", flush=True)
+        print("Controls: s → DefaultPose; b → ScaleBFM DefaultPose standing; a → task; x → stop; g → reference ghosts; c → frames/translucent box ↔ no frames/opaque yellow box; Space → pause/resume", flush=True)
         if self._headless:
             print(
                 "Headless: type one key and Enter in the simulator terminal", flush=True

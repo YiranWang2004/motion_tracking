@@ -75,6 +75,57 @@ def make_sim():
     return DualScaleBFMSim2Sim(CONFIG, headless=True, transports=transports)
 
 
+def test_pause_keeps_snapshot_and_physics_frozen_then_resumes(monkeypatch):
+    sim = make_sim()
+    try:
+        sim.key_callback(ord(" "))
+        before = sim.data.qpos.copy()
+        stamp = 123
+        sim.publish_state_pair(stamp)
+        snapshot_id = sim._snapshot_id
+        sleeps = []
+
+        def paused_tick(delay):
+            sleeps.append(delay)
+            np.testing.assert_array_equal(sim.data.qpos, before)
+            assert sim.data.time == 0.0
+            assert sim._snapshot_id == snapshot_id
+            assert sim._ghost_frame == sim.start_frame
+            if len(sleeps) == 3:
+                sim.key_callback(ord("g"))
+                sim.key_callback(ord(" "))
+
+        monkeypatch.setattr(time, "sleep", paused_tick)
+        assert sim._wait_while_paused(stamp)
+        assert len(sleeps) == 3
+        assert not sim._paused
+        assert not sim._ghost_visible
+        for transport in sim.transports:
+            assert len(transport.states) == 4
+            assert all(s["state_receive_time_ns"] == stamp for s in transport.states)
+            assert all(s["buttons"] == transport.states[0]["buttons"] for s in transport.states)
+        sim.step_policy_interval(tuple(command(sim, i, enable=1) for i in range(2)))
+        assert sim.data.time > 0.0
+    finally:
+        sim.close()
+
+
+def test_stop_unpauses_and_viewer_close_exits_pause():
+    from types import SimpleNamespace
+
+    sim = make_sim()
+    try:
+        sim.key_callback(ord(" "))
+        sim.key_callback(ord("x"))
+        assert not sim._paused
+        assert list(sim._key_queue) == ["stop"]
+        sim.key_callback(ord(" "))
+        sim._viewer = SimpleNamespace(is_running=lambda: False)
+        assert not sim._wait_while_paused(123)
+    finally:
+        sim.close()
+
+
 @pytest.mark.parametrize("only", [False, True])
 def test_viewer_frames_and_digits_follow_poses_through_task_start(only):
     from contextlib import nullcontext
@@ -103,6 +154,22 @@ def test_viewer_frames_and_digits_follow_poses_through_task_start(only):
             root = sim.data.qpos[sim.bindings[0].root_qpos:sim.bindings[0].root_qpos + 3]
             np.testing.assert_allclose(scene.geoms[frames].pos, root + [0, 0, 1.54])
             np.testing.assert_array_equal(sim.data.qpos, before)
+            visible_count = scene.ngeom
+            sim.key_callback(ord("c"))
+            sim._draw_status()
+            assert scene.ngeom == visible_count - frames
+            if not only:
+                np.testing.assert_allclose(
+                    sim.model.geom_rgba[sim._box_visual_geom], [0.8, 0.6, 0.4, 1.0]
+                )
+            np.testing.assert_array_equal(sim.data.qpos, before)
+            sim.key_callback(ord("c"))
+            sim._draw_status()
+            assert scene.ngeom == visible_count
+        if not only:
+            box_geom = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_GEOM, "box_collision")
+            np.testing.assert_allclose(sim.model.geom_rgba[box_geom], sim._transparent_box_rgba)
+            assert sim.model.geom_rgba[box_geom, 3] == pytest.approx(0.3)
     finally:
         sim.close()
 
