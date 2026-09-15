@@ -11,6 +11,9 @@ This branch supports:
 It does not include training code or dataset generation code.
 The L7 hardware sim2real bridge is not part of this branch.
 
+Single-G1 ScaleBFM Pico teleoperation (host/onboard inference, local/Vive pelvis):
+[setup and validation boundaries](sim2real/SCALEBFM_TELEOP_ZH.md).
+
 ## Directory Layout
 
 ```text

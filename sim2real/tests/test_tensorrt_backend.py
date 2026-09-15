@@ -97,3 +97,23 @@ def test_reject_wrong_actor_or_engine_before_spawn(directory, monkeypatch):
     (directory / "scalebfm.engine").write_bytes(b"changed")
     with pytest.raises(ValueError, match="checksum"):
         module.TensorRTBackend(directory, {}, "a")
+
+
+def test_single_model_needs_no_residual(directory, monkeypatch):
+    manifest = json.loads((directory / "engine_manifest.json").read_text())
+    manifest["robot"] = None
+    manifest["engines"].pop("residual_a.engine")
+    (directory / "engine_manifest.json").write_text(json.dumps(manifest))
+    monkeypatch.setitem(HEADER, "models", HEADER["models"][:1])
+    fake_worker(monkeypatch, """while True:
+ index=sys.stdin.buffer.read(1)
+ if not index:break
+ data=sys.stdin.buffer.read((3*64+3*29+6*267)*4)
+ sys.stdout.buffer.write(struct.pack('29f',*([0.25]*29)));sys.stdout.buffer.flush()
+""")
+    runner = module.TensorRTBackend(directory, {}, None, timeout_s=.2)
+    try:
+        result = runner.infer(0, np.zeros((1,3,64)), np.zeros((1,3,29)), np.zeros((1,6,267)))
+        np.testing.assert_array_equal(result, np.full((1,29),.25))
+    finally:
+        runner.close()

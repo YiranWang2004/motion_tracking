@@ -5,7 +5,7 @@ compliance_flag_value: 1.0 # 0.0 to disable compliance, 1.0 to enable compliance
 compliance_flag_threshold: 10.0 # 10.0 ~ 20.0
 future_steps: [0, 1, 2, 3, 4, 5, 6, -1, -2, -4, -8, -12, -16] # format: [0, ...future, ...history]
 motion_source:
-  type: "udp"
+  type: "vr"
   udp:
     enable: true
     host: "127.0.0.1"

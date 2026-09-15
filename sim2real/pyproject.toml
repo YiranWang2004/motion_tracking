@@ -20,6 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+scalebfm = [
+  "torch>=2.4",
+]
 vive = [
   "openvr==2.12.1401",
 ]

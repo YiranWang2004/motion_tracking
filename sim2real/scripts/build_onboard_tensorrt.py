@@ -17,11 +17,13 @@ def sha(path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--directory", required=True)
-    p.add_argument("--robot", choices=["a", "b"], required=True)
+    selection = p.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--robot", choices=["a", "b"])
+    selection.add_argument("--single", action="store_true", help="standalone ScaleBFM, no residual")
     a = p.parse_args()
     root = Path(a.directory).resolve()
     manifest = json.loads((root / "export.json").read_text())
-    names = ["scalebfm", f"residual_{a.robot}"]
+    names = ["scalebfm"] if a.single else ["scalebfm", f"residual_{a.robot}"]
     engines = {}
     for name in names:
         onnx = root / f"{name}.onnx"

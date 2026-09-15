@@ -313,11 +313,21 @@ class LowLatencyTeleopPoseZMQServer:
             if sample.used_fallback:
                 self.fallback_count += 1
             qpos_frame = np.ascontiguousarray(np.asarray(sample.qpos, dtype=np.float32).reshape(1, -1))
+            with self.latest_vr_lock:
+                reply_buttons = dict(self.last_controller_buttons)
+                raw_recv_ns = self.latest_raw_recv_ns
             header = json.dumps(
                 {
                     "start": bool(req.get("start", False)),
                     "num_frames": int(qpos_frame.shape[0]),
                     "qpos_size": int(qpos_frame.shape[1]),
+                    "protocol_version": 2,
+                    "request_id": req.get("request_id"),
+                    "joint_names": list(self.config.dof_names),
+                    "controller_buttons": reply_buttons,
+                    "control_age_s": None if raw_recv_ns is None else (time.monotonic_ns()-raw_recv_ns)*1e-9,
+                    "sample_time_ns": sample.info.get("sample_time_ns"),
+                    "sample_age_s": max(0.0, (time.monotonic_ns() - sample.info.get("sample_time_ns", 0)) * 1e-9),
                 }
             ).encode("utf-8")
             try:
