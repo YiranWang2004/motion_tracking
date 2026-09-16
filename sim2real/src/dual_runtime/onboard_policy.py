@@ -62,7 +62,7 @@ class OnboardPolicy(DualScaleBFMResidualPolicy):
             self.initialized = False
             self.reset_rollout()
 
-    def compute_single(self, state, snapshot):
+    def compute_single(self, state, snapshot, *, advance=True, residual_gain=1.0):
         if not self.initialized:
             raise RuntimeError("initialize before task inference")
         started = time.perf_counter()
@@ -73,6 +73,9 @@ class OnboardPolicy(DualScaleBFMResidualPolicy):
         history.update(state.quat_wxyz, state.gyro, state.q_lab, state.dq_lab,
                        self.previous_executed_action[i])
         positions, quaternions = self.reference.future_key_bodies(self.frame, self.time_offsets)
+        if not advance:
+            positions = np.repeat(positions[:, :1], 6, axis=1)
+            quaternions = np.repeat(quaternions[:, :1], 6, axis=1)
         target, action = self.scalebfm.infer_batch(
             (history,), positions[i:i+1], quaternions[i:i+1],
             live.body_pos_w[None], live.body_quat_wxyz[None],
@@ -85,7 +88,7 @@ class OnboardPolicy(DualScaleBFMResidualPolicy):
             default_q=self.default_q,
             anchor_angular_velocity_frame=self.anchor_angular_velocity_frame,
         )
-        residual = self.residual.infer_agent(observation, i)
+        residual = self.residual.infer_agent(observation, i) * float(residual_gain)
         combined = target[0] + self.residual_scale * residual
         if not np.isfinite(combined).all():
             raise RuntimeError("non-finite onboard target")
@@ -93,7 +96,7 @@ class OnboardPolicy(DualScaleBFMResidualPolicy):
         self.previous_executed_action[i] = action[0] + self.residual_scale * residual / self.scalebfm.action_scale
         frame = self.frame
         complete = frame == self.reference.frames - 1
-        if not complete:
+        if not complete and advance:
             self.frame += 1
         return OnboardStep(combined, target[0], residual, observation, frame,
                            complete, time.perf_counter() - started)

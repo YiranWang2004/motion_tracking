@@ -7,6 +7,8 @@ from dual_runtime.dual_pose_provider import DualPoseSnapshot
 from dual_runtime.interactive_control import load_default_command
 from dual_runtime.tensorrt_backend import attach_tensorrt
 from dual_runtime.onboard_policy import OnboardPolicy, OnboardStanding
+from dual_runtime.local_scalebfm_standing import LocalScaleBFMStanding
+from dual_runtime.vive_recovery import recovery_settings
 from dual_runtime.onboard_config import (
     load_onboard_config,
     load_yaml,
@@ -98,11 +100,30 @@ def main():
 
     cpu, cput = run()
     print("CPU", stats(cput), flush=True)
+    def run_local():
+        local = LocalScaleBFMStanding(policy,
+            load_default_command(resolve(path.parent, 'omnicontact')),
+            recovery_settings(config.get('vive_recovery')))
+        local.arm()
+        local.hold(state.q_lab, state.q_lab)
+        for i in range(10):
+            local.compute(state, 1.+i*.02)
+        local.fallback(2.)
+        output, timings = [], []
+        for i in range(a.steps):
+            start = time.perf_counter()
+            command = local.compute(state, 2.+i*.02)
+            timings.append((time.perf_counter()-start)*1000)
+            output.append(command.target_pos.copy())
+        return np.stack(output), timings
+    local_cpu, _ = run_local()
     backend = attach_tensorrt(policy, a.engines, files, a.robot, timeout_s=5.0)
     try:
         gpu, gput = run()
         backend.timeout_s = 0.08
         np.testing.assert_allclose(gpu, cpu, atol=0.002, rtol=0.001)
+        local_gpu, local_times = run_local()
+        np.testing.assert_allclose(local_gpu, local_cpu, atol=.002, rtol=.001)
         standing = OnboardStanding(
             policy, load_default_command(resolve(path.parent, "omnicontact"))
         )
@@ -122,8 +143,10 @@ def main():
             cpu_task=stats(cput),
             tensorrt_task=stats(gput),
             tensorrt_standing=stats(standing_times),
+            tensorrt_local_return=stats(local_times),
+            max_local_target_error_rad=float(np.abs(local_gpu-local_cpu).max()),
             max_target_error_rad=float(np.abs(gpu - cpu).max()),
-            meets_18ms_max=max(gput + standing_times) < 18,
+            meets_18ms_max=max(gput + standing_times + local_times) < 18,
         )
         print(json.dumps(report, indent=2), flush=True)
         if a.output:

@@ -95,3 +95,28 @@ def test_recalibration_preserves_independent_box_axes(tmp_path, monkeypatch):
     assert result["box_world_calibration"]["tracker_serial"] == "box"
     np.testing.assert_allclose(result["object_tracker_to_object"]["quaternion_xyzw"],
                                config["object_tracker_to_object"]["quaternion_xyzw"], atol=1e-12)
+
+
+def test_auto_sync_runs_after_save_and_obeys_opt_out(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from scripts import calibrate_vive_box_world as calibration
+    path = tmp_path/'vive.json'
+    path.write_text(json.dumps(dict(object_tracker_serial='box')))
+    monkeypatch.setattr(calibration, 'OpenVRTrackerReader', lambda serials: SimpleNamespace(
+        start=lambda: {'box': 0}, stop=lambda: None))
+    monkeypatch.setattr(calibration, 'capture_pose', lambda *args: SimpleNamespace(
+        position_s=np.array([2.,3.,4.]), quaternion_s_tracker_xyzw=np.array([0.,0.,0.,1.]),
+        valid_samples=150, orientation_std_deg=.01))
+    calls=[]
+    def sync(output):
+        assert 'box_world_calibration' in json.loads(output.read_text())
+        calls.append(output)
+        return 1  # Local result must survive a remote sync failure.
+    monkeypatch.setattr(calibration, 'sync_saved_calibration', sync)
+    args=['--vive-config',str(path),'--output',str(path)]
+    assert calibration.main(args)==1
+    assert calls==[path]
+    assert calibration.main(args+['--no-sync-robots'])==0
+    assert calibration.main(['--vive-config',str(path)])==0
+    assert calls==[path]

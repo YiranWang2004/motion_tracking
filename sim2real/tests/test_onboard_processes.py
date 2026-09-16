@@ -21,10 +21,12 @@ from common.udp_transport import UDPRobotLow
 from dual_runtime.onboard_config import sha256, channel_endpoints, load_onboard_config
 from dual_runtime.onboard_network import LatestChannel
 from dual_runtime.onboard_relay import namespace_relays, team_hub
+from dual_runtime.interactive_control import load_default_command
 
 
 @pytest.mark.parametrize("transport", ["wireless", "wired_namespace"])
-def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transport):
+@pytest.mark.parametrize('recover_vive', [False, True])
+def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transport, recover_vive):
     root = Path(__file__).resolve().parents[1]
     old = root / "config/g1/dual_policy_artifacts_contact_v2_8192"
     artifacts = tmp_path / "test_artifacts"
@@ -39,9 +41,9 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transpor
         arrays = {k: data[k].copy() for k in data.files}
     for key in arrays:
         if key.startswith("training_robot_") and any(key.endswith(s) for s in ("joint_pos", "joint_vel", "body_pos_w", "body_quat_w", "body_ang_vel_w", "body_lin_vel_w")):
-            arrays[key] = np.repeat(arrays[key][1:2], 15, axis=0)
+            arrays[key] = np.repeat(arrays[key][1:2], 300 if recover_vive else 15, axis=0)
         if key in {"training_object_body_pos_w", "training_object_body_quat_w"}:
-            arrays[key] = np.repeat(arrays[key][1:2], 15, axis=0)
+            arrays[key] = np.repeat(arrays[key][1:2], 300 if recover_vive else 15, axis=0)
     np.savez(ref, **arrays)
     manifest["files"][ref.name]["sha256"] = sha256(ref)
     manifest["checkpoint_contract"].update(interaction_frame="pelvis",
@@ -51,12 +53,15 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transpor
     base = yaml.safe_load((root / "config/g1/dual_scalebfm_contact_v2_8192.yaml").read_text())
     base["default_pose_duration_s"] = .2
     base["torch_num_threads"] = 1
+    base['reference_alignment'] = 'motion_world'
     base["joint_limits_source"] = str(root / "config/g1/omnicontact/OmniContact.yaml")
     base["control"]["standing_asset_dir"] = str(root / "config/g1/omnicontact")
     base_file = tmp_path / "policy.yaml"
     base_file.write_text(yaml.safe_dump(base))
     config.update(policy_config=str(base_file), artifact_directory=str(artifacts),
                   vive_config=str(root / "config/g1/omnicontact_vive_dual.json"))
+    if recover_vive:
+        config['vive_recovery'] = dict(enabled=True, return_s=.3)
     config["runtime"].update(max_processing_s=.1, max_slow_ticks=10,
         local_state_timeout_s=.1, max_command_gap_s=.15, max_frame_skew=5)
     config["network"]["host"] = "127.0.0.1"
@@ -162,18 +167,53 @@ def test_two_onboard_processes_complete_and_stop_on_vive_loss(tmp_path, transpor
                 time.sleep(.02)
             raise AssertionError("\n".join(text))
         wait_phase("zero")
-        for button, phase in (("start", "default"), ("B", "standing"), ("A", "finished")):
+        for button, phase in (("start", "default"), ("B", "standing"),
+                              ("A", "executing" if recover_vive else "finished")):
             time.sleep(.3)
             buttons[0] = {button: True}
             time.sleep(.12)
             buttons[0] = {}
             wait_phase(phase)
+        if recover_vive:
+            publish_poses.clear()
+            time.sleep(.5)
+            assert all(p.poll() is None for p in procs)
+            publish_poses.set()
+            deadline = time.monotonic()+4
+            while time.monotonic()<deadline:
+                text=[(tmp_path/f'{s}.txt').read_text() for s in 'ab']
+                assert all(p.poll() is None for p in procs), '\n'.join(text)
+                if all('vive_recovery=normal' in t for t in text):
+                    break
+                time.sleep(.02)
+            else:
+                raise AssertionError('\n'.join(text))
         publish_poses.clear()
+        if recover_vive:
+            # Outage lasts longer than both the 1 s fallback and 2 s pose clock lease.
+            time.sleep(2.3)
+            text=[(tmp_path/f'{s}.txt').read_text() for s in 'ab']
+            assert all(p.poll() is None for p in procs), '\n'.join(text)
+            assert all('vive_recovery=fallback' in t for t in text), '\n'.join(text)
+            publish_poses.set()
+            time.sleep(.3)
+            buttons[0] = {'stop': True}
         for proc in procs:
             proc.wait(timeout=5)
         metadata = [json.loads(p.read_text()) for p in (tmp_path / "logs").glob("*/metadata.json")]
         assert len(metadata) == 2
-        assert all("pose" in m["exit_reason"] or "peer_fault" in m["exit_reason"] for m in metadata), metadata
+        if recover_vive:
+            assert all('operator_stop' in m['exit_reason'] for m in metadata), metadata
+            for path in (tmp_path/'logs').glob('*/rollout.npz'):
+                with np.load(path) as data:
+                    modes=data['recovery_mode']
+                    assert {'grace','recovering','fallback'} <= set(modes)
+                    first=int(np.flatnonzero(modes=='fallback')[0])
+                    assert np.all(modes[first:]=='fallback')
+                    np.testing.assert_allclose(data['recovery_reference_q'][-1],
+                        load_default_command(root/'config/g1/omnicontact').target_pos, atol=1e-5)
+        else:
+            assert all("pose" in m["exit_reason"] or "peer_fault" in m["exit_reason"] for m in metadata), metadata
         assert metadata[0]["identity"] == metadata[1]["identity"]
         assert metadata[0]["run_id"] == metadata[1]["run_id"]
         for side_commands in commands:

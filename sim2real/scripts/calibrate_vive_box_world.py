@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -118,6 +120,26 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def sync_saved_calibration(output_path: Path) -> int:
+    """Sync the saved file only when an installed onboard task references it."""
+    root = Path(__file__).resolve().parents[1]
+    for task in ('lift', 'lateral'):
+        path = root / f'config/g1/onboard_scalebfm_wired_{task}.yaml'
+        config = yaml.safe_load(path.read_text())
+        if (path.parent / config['vive_config']).resolve() != output_path.resolve():
+            continue
+        result = subprocess.run([
+            '/usr/bin/python3', str(root / 'scripts/sync_onboard_vive.py'),
+            '--calibration-only', '--connected-only', '--config', str(path),
+            '--source', str(output_path)], check=False)
+        if result.returncode:
+            print('WARNING: 本机标定已保存，但机器人同步未全部成功；请检查上面的同步结果。',
+                  file=sys.stderr)
+        return result.returncode
+    print('自动同步跳过：输出文件不是 lift/lateral 本体任务引用的 Vive JSON。')
+    return 0
+
+
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Calibrate world_from_steamvr from a Tracker placed on the box"
@@ -134,6 +156,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="box Tracker serial; defaults to object_tracker_serial in the JSON",
     )
     parser.add_argument("--samples", type=int, default=150)
+    parser.add_argument('--no-sync-robots', action='store_true',
+                        help='save calibration locally without syncing connected onboard robots')
     parser.add_argument(
         "--box-center-world",
         type=float,
@@ -228,6 +252,12 @@ def main(argv: list[str] | None = None) -> int:
             "WARNING: calibration_confirmed is not true; inspect the transforms "
             "and set it to true before deployment."
         )
+    if not args.no_sync_robots:
+        try:
+            return sync_saved_calibration(output_path)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            print(f'WARNING: 本机标定已保存，但自动同步失败：{exc}', file=sys.stderr)
+            return 1
     return 0
 
 

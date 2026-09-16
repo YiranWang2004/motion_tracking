@@ -47,6 +47,16 @@ B 的旧版 ARM glibc 曾在正常入口加载 PyTorch 时出现 static TLS bloc
 
 ### 同步仓库与标定
 
+`calibrate_vive_box_world.py --output config/g1/omnicontact_vive_dual.json` 保存成功后，
+默认自动同步可连接的机器人上的标定 JSON，不需要再手动复制。A/B 分别检查，离线侧
+显示 `SKIPPED`；连接成功但写入/校验失败显示 `FAILED` 并返回非零退出码，本机标定保留。
+复用 namespace SSH 连接；需要建立连接时通过终端进行 sudo/SSH 认证，不保存密码。
+远端保留备份并进行原子替换、SHA256 校验。未指定 `--output` 或添加
+`--no-sync-robots` 时不自动同步。自定义输出路径只有被已安装任务 YAML 引用才会同步，
+避免把临时试验标定覆盖到实机。
+
+同步后仍需重启 Vive publisher 和两台策略加载新 JSON；不会自动重启控制进程。
+
 在主机 `sim2real/` 目录下执行：
 
 ```bash

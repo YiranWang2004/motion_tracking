@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 
 @unittest.skipUnless(importlib.util.find_spec('configobj'), 'requires desktop Python dependencies')
@@ -113,6 +115,77 @@ class RepositorySyncTest(unittest.TestCase):
             again = subprocess.run(rsync_command(root, str(dest), check=True),
                                    input=files, stdout=subprocess.PIPE, check=True)
             self.assertFalse(again.stdout)
+
+
+@unittest.skipUnless(importlib.util.find_spec('configobj'), 'requires desktop Python dependencies')
+class ConnectedCalibrationSyncTest(unittest.TestCase):
+    def setUp(self):
+        scripts = Path(__file__).resolve().parents[1]/'scripts'
+        sys.path.insert(0, str(scripts))
+        import sync_onboard_vive
+        self.module = sync_onboard_vive
+        self.addCleanup(lambda: sys.path.remove(str(scripts)))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.sim = self.root/'sim2real'
+        self.sim.mkdir()
+        self.source = self.sim/'vive.json'
+        self.source.write_text('{"new_calibration": true}\n')
+        self.digest = hashlib.sha256(self.source.read_bytes()).hexdigest()
+        self.args = SimpleNamespace(remote_root='/home/unitree/wyr/motion_tracking', check=False)
+        self.net = dict(a={}, b={})
+        self.topology = dict(robot_ip='192.168.123.164', robot_a=dict(namespace='g1a'),
+                             robot_b=dict(namespace='g1b'))
+        for patch in (mock.patch.object(self.module, 'ROOT', self.sim),
+                      mock.patch.object(Path, 'home', return_value=self.root)):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.calls = []
+
+    def remote(self, socket, host, request):
+        self.calls.append((socket.name, request.copy()))
+        if request['operation'] == 'check':
+            return dict(sha256='old', path='/remote/vive.json', status='checked')
+        self.assertEqual(base64.b64decode(request['data']), self.source.read_bytes())
+        self.assertEqual(request['expected_old'], 'old')
+        return dict(sha256=self.digest, path='/remote/vive.json', status='updated', backup=None)
+
+    def run_sync(self):
+        return self.module.sync_connected_calibration(self.args, self.sim/'task.yaml',
+            self.source, self.topology, self.net)
+
+    def test_one_offline_robot_does_not_block_connected_robot(self):
+        with mock.patch.object(self.module, 'connected_robot', side_effect=lambda side,*a: side=='a'), \
+             mock.patch.object(self.module, 'remote_request', side_effect=self.remote):
+            self.assertEqual(self.run_sync(), 0)
+        self.assertEqual(len(self.calls), 2)
+        self.assertTrue(all('g1-a-' in name for name, _ in self.calls))
+
+    def test_failure_on_a_still_attempts_b_and_returns_failure(self):
+        def remote(socket, *args):
+            if 'g1-a-' in socket.name:
+                raise RuntimeError('remote update failed')
+            return self.remote(socket, *args)
+        with mock.patch.object(self.module, 'connected_robot', return_value=True), \
+             mock.patch.object(self.module, 'remote_request', side_effect=remote):
+            self.assertEqual(self.run_sync(), 1)
+        self.assertTrue(any('g1-b-' in name for name,_ in self.calls))
+
+    def test_no_connections_means_no_remote_writes(self):
+        with mock.patch.object(self.module, 'connected_robot', return_value=False), \
+             mock.patch.object(self.module, 'remote_request') as remote:
+            self.assertEqual(self.run_sync(), 0)
+            remote.assert_not_called()
+
+    def test_changed_local_file_is_not_sent_after_preflight(self):
+        def remote(socket,host,request):
+            self.assertEqual(request['operation'], 'check')
+            self.source.write_text('{"changed": true}')
+            return dict(sha256='old')
+        with mock.patch.object(self.module, 'connected_robot', return_value=True), \
+             mock.patch.object(self.module, 'remote_request', side_effect=remote):
+            self.assertEqual(self.run_sync(), 1)
 
 
 if __name__ == '__main__':

@@ -23,6 +23,10 @@ PROTOCOL = "g1-onboard-v1"
 MAX_PACKET = 8192
 
 
+class PoseUnavailable(RuntimeError):
+    """Only missing/old Vive data may enter recovery; future/invalid data is fatal."""
+
+
 class ClockEstimate:
     def __init__(self, max_rtt_s=0.02):
         self.max_rtt_s = max_rtt_s
@@ -144,13 +148,15 @@ class LatestChannel:
         with self._lock:
             packet = self.latest
         if packet is None:
-            raise RuntimeError(f"missing_{self.kind}")
+            raise (PoseUnavailable if self.kind == 'pose' else RuntimeError)(f"missing_{self.kind}")
         msg, arrival = packet
         age = time.time() - (msg["sent"] - offset)
-        if age < -uncertainty - .002 or age + uncertainty > max_age_s:
+        if age < -uncertainty - .002:
             raise RuntimeError(f"stale_or_future_{self.kind}")
+        if age + uncertainty > max_age_s:
+            raise (PoseUnavailable if self.kind == 'pose' else RuntimeError)(f"stale_or_future_{self.kind}")
         if time.monotonic() - arrival > max_age_s:
-            raise RuntimeError(f"missing_{self.kind}")
+            raise (PoseUnavailable if self.kind == 'pose' else RuntimeError)(f"missing_{self.kind}")
         return msg["payload"], offset, uncertainty
 
     def close(self):
@@ -179,7 +185,7 @@ def decode_pose(payload, *, calibration_id, offset, uncertainty, max_age_s,
     if payload.get("calibration_id") != calibration_id:
         raise RuntimeError("vive_calibration_mismatch")
     age = wall - (float(payload["captured"]) - offset)
-    if not math.isfinite(age) or age < -uncertainty-.002 or age+uncertainty > max_age_s:
+    if not math.isfinite(age) or age < -uncertainty-.002:
         raise RuntimeError("stale_or_future_vive_capture")
     poses = np.asarray(payload["poses"], dtype=np.float32)
     extents = np.asarray(payload["half_extents"], dtype=np.float32)
@@ -188,6 +194,8 @@ def decode_pose(payload, *, calibration_id, offset, uncertainty, max_age_s,
     norms = np.linalg.norm(poses[:, 3:], axis=-1)
     if np.any(np.abs(norms-1) > .01):
         raise ValueError("invalid network pose quaternion")
+    if age+uncertainty > max_age_s:
+        raise PoseUnavailable("stale_or_future_vive_capture")
     poses[:, 3:] /= norms[:, None]
     stamp = mono - max(0., age + uncertainty)
     return DualPoseSnapshot(

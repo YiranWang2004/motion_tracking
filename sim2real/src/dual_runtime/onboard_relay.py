@@ -32,7 +32,19 @@ def allowed_packet(data, kind):
                   if kind == "pose" else
                   {"robot_id", "fingerprint", "phase", "epoch", "proposal", "ack",
                    "committed", "event_id", "event", "ready", "frame", "fault"})
-        if not isinstance(payload, dict) or set(payload) != fields:
+        if not isinstance(payload, dict):
+            return False
+        if kind == 'team' and 'vive_recovery' in payload:
+            recovery = payload['vive_recovery']
+            if not isinstance(recovery, dict) or set(recovery) != {
+                    'mode','healthy','sample_at','loss','plan','ack','committed','fallback_at','rejected'}:
+                return False
+            plan = recovery['plan']
+            if plan is not None and (not isinstance(plan, dict) or set(plan) != {
+                    'id','at','frame','losses','commit'}):
+                return False
+            fields = fields | {'vive_recovery'}
+        if set(payload) != fields:
             return False
         if kind == "team" and payload["proposal"] is not None:
             if not isinstance(payload["proposal"], dict) or set(payload["proposal"]) != {"epoch", "phase", "at", "commit"}:

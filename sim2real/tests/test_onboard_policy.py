@@ -122,3 +122,38 @@ def test_legacy_manifest_rejected_for_onboard():
     root = Path(__file__).resolve().parents[1] / "config/g1/dual_policy_artifacts_contact_v2_8192"
     with pytest.raises(ValueError, match="pelvis/reference-anchor"):
         load_artifacts(root)
+
+
+def test_local_return_uses_only_imu_and_own_joints(policies):
+    from dual_runtime.local_scalebfm_standing import LocalScaleBFMStanding, CommandBlend
+    from dual_runtime.vive_recovery import recovery_settings
+    from dual_runtime.interactive_control import load_default_command
+    from omnicontact.contracts import PDCommand
+    root = Path(__file__).resolve().parents[1]
+    default = load_default_command(root/'config/g1/omnicontact')
+    p = policies[0]
+    local = LocalScaleBFMStanding(p, default, recovery_settings({'enabled': True}))
+    local.arm()
+    initial = default.target_pos.copy()
+    initial[15] += .2
+    local.hold(initial, initial)
+    local.fallback(10.)
+    original = p.residual
+    class ForbiddenResidual:
+        def infer_agent(self, *args):
+            raise AssertionError('local standing must not run residual')
+    p.residual = ForbiddenResidual()
+    try:
+        for t in (10., 10.5, 11., 12., 13.):
+            command = local.compute(state(default.target_pos), t)
+            assert command.target_pos.shape == (29,)
+            assert np.isfinite(command.target_pos).all()
+        np.testing.assert_allclose(local.reference_q, default.target_pos)
+    finally:
+        p.residual = original
+    # Output handover starts at the actual previous PD command, including gains.
+    blend = CommandBlend(.25)
+    start = PDCommand(initial, np.ones(29)*30, np.ones(29))
+    blend.reset(start, 0.)
+    np.testing.assert_allclose(blend.apply(default, 0.).target_pos, initial)
+    np.testing.assert_allclose(blend.apply(default, .25).target_pos, default.target_pos)

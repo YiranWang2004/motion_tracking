@@ -74,8 +74,83 @@ def remote_request(socket, host, request):
     result = subprocess.run(
         ['ssh', '-S', str(socket), '-o', 'BatchMode=yes', '-o', 'ProxyCommand=false',
          f'unitree@{host}', shlex.join([python, '-c', REMOTE])],
-        input=json.dumps(request), text=True, stdout=subprocess.PIPE, check=True)
+        input=json.dumps(request), text=True, stdout=subprocess.PIPE, check=True, timeout=15)
     return json.loads(result.stdout)
+
+
+def connected_robot(side, host, namespace, socket):
+    """Reuse a live namespace SSH master; reconnect only in an existing namespace."""
+    target = f'unitree@{host}'
+    master = subprocess.run(['ssh', '-S', str(socket), '-O', 'check', target],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=4)
+    if master.returncode:
+        result = subprocess.run(['ip', 'netns', 'list'], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=4)
+        namespaces = {line.split()[0] for line in result.stdout.splitlines() if line.strip()}
+        if namespace not in namespaces:
+            print(f'{side.upper()}: SKIPPED — 未建立网络 {namespace}，未连接机器人。', flush=True)
+            return False
+        # No stored password. Normal sudo/SSH authentication is reused or requested.
+        ensure_connection(side, host, namespace, socket)
+    result = subprocess.run(['ssh', '-S', str(socket), '-o', 'BatchMode=yes',
+                             '-o', 'ProxyCommand=false', target, 'true'],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=5)
+    if result.returncode:
+        print(f'{side.upper()}: SKIPPED — 机器人 SSH 不可用。', flush=True)
+        return False
+    return True
+
+
+def sync_connected_calibration(args, path, source, topology, net):
+    data = source.read_bytes()
+    if not isinstance(json.loads(data), dict):
+        raise ValueError('Vive calibration must be a JSON object')
+    digest = hashlib.sha256(data).hexdigest()
+    directory = Path.home() / '.ssh/ctl'
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    relative = path.relative_to(ROOT.parent)
+    synced, failed, skipped = [], [], []
+    print(f'自动同步已保存的标定：{source}\nSHA256: {digest}', flush=True)
+    for side in ('a', 'b'):
+        host = net[side].get('host', topology['robot_ip'])
+        socket = directory / f'unitree-g1-{side}-deploy'
+        try:
+            if not connected_robot(side, host, topology[f'robot_{side}']['namespace'], socket):
+                skipped.append(side.upper())
+                continue
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f'{side.upper()}: SKIPPED — 连接/认证失败：{exc}', flush=True)
+            skipped.append(side.upper())
+            continue
+        try:
+            request = dict(root=args.remote_root, config=str(relative), operation='check')
+            old = remote_request(socket, host, request)
+            if source.read_bytes() != data:
+                raise RuntimeError('本机标定在同步期间发生变化，请重新同步')
+            if args.check:
+                if old['sha256'] != digest:
+                    raise RuntimeError('远端 SHA256 与本机不一致')
+                result = old
+            else:
+                request.update(operation='sync', data=base64.b64encode(data).decode(),
+                               sha256=digest, expected_old=old['sha256'])
+                result = remote_request(socket, host, request)
+            if result['sha256'] != digest:
+                raise RuntimeError('远端 SHA256 校验失败')
+            synced.append(side.upper())
+            print(f"{side.upper()}: {result['status']} — SHA256 verified；{result['path']}", flush=True)
+            if result.get('backup'):
+                print(f"  Backup: {result['backup']}", flush=True)
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as exc:
+            failed.append(side.upper())
+            print(f'{side.upper()}: FAILED — {exc}', file=sys.stderr, flush=True)
+    if source.read_bytes() != data:
+        print('FAILED — 同步期间本机标定发生变化，请重新同步。', file=sys.stderr)
+        return 1
+    print(f"标定同步结果：已校验 {','.join(synced) or '无'}；跳过 {','.join(skipped) or '无'}；失败 {','.join(failed) or '无'}。", flush=True)
+    if not args.check:
+        print('本机标定已保存。重新启动 Vive publisher 和两台本体策略以加载新标定；运行中的进程不会自动重启。', flush=True)
+    return int(bool(failed))
 
 
 def repository_files(root, exclusions=()):
@@ -184,9 +259,16 @@ def main():
     parser.add_argument('--remote-root', default='/home/unitree/wyr/motion_tracking')
     parser.add_argument('--check', action='store_true', help='preview checksum differences without writing files')
     parser.add_argument('--calibration-only', action='store_true', help='use the original calibration-only sync')
+    parser.add_argument('--connected-only', action='store_true',
+                        help='calibration only: sync reachable robots independently; skip offline robots')
+    parser.add_argument('--source', help='verify the exact saved calibration path (connected-only mode)')
     parser.add_argument('--exclude', action='append', default=[], metavar='PATH',
                         help='exclude a repository-relative file or directory; repeatable')
     args = parser.parse_args()
+    if (args.connected_only or args.source) and not args.calibration_only:
+        parser.error('--connected-only / --source require --calibration-only')
+    if args.source and not args.connected_only:
+        parser.error('--source requires --connected-only')
     if os.geteuid() == 0:
         parser.error('run as the desktop user, not with sudo')
     path = (ROOT / (args.config or TASKS[args.task])).resolve()
@@ -204,6 +286,10 @@ def main():
     if args.exclude:
         parser.error('--exclude applies only to repository synchronization')
     source = (path.parent / config['vive_config']).resolve()
+    if args.source and Path(args.source).expanduser().resolve() != source:
+        parser.error('--source must be the Vive JSON referenced by the onboard task')
+    if args.connected_only:
+        return sync_connected_calibration(args, path, source, topology, net)
     data = source.read_bytes()
     if not isinstance(json.loads(data), dict):
         parser.error('Vive calibration must be a JSON object')

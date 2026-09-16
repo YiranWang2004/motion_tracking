@@ -36,7 +36,7 @@ class TeamState:
                     ack=self.ack, committed=self.committed, event_id=self.event_id,
                     event=self.event, ready=bool(ready), frame=int(frame), fault=self.fault)
 
-    def update(self, peer, now, *, ready, complete=False):
+    def update(self, peer, now, *, ready, complete=False, suspended=False):
         """Return True exactly once per locally activated phase transition.
 
         PREPARE -> ACK -> COMMIT -> commit ACK precedes the future activation
@@ -56,6 +56,14 @@ class TeamState:
             raise RuntimeError("peer_phase_transition_timeout")
         if peer_epoch == self.epoch and peer["phase"] != self.phase:
             raise RuntimeError("team_phase_mismatch")
+        if suspended:
+            # Recovery freezes the current phase. Still check identity, faults,
+            # and phase agreement above; consume button events, never queue them.
+            self.proposal = None
+            self.ack = self.committed = 0
+            self._seen[self.robot_id] = self.event_id
+            self._seen[other] = int(peer['event_id'])
+            return False
         target = None
         for side, event_id, event in (
             (self.robot_id, self.event_id, self.event),

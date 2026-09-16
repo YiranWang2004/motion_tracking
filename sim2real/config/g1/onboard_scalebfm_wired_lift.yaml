@@ -4,6 +4,17 @@ policy_config: dual_scalebfm_contact_v2_box1m.yaml
 artifact_directory: dual_policy_artifacts_lift1m_new
 vive_config: omnicontact_vive_dual.json
 cpu_affinity: []
+vive_recovery:
+  enabled: true
+  detect_after_s: 0.10
+  outage_timeout_s: 1.0
+  blend_s: 0.5
+  return_s: 2.0
+  command_blend_s: 0.25
+  resume_delay_s: 0.20
+  valid_samples: 3
+  max_position_jump_m: 0.35
+  max_orientation_jump_rad: 0.6
 acceleration:
   backend: tensorrt
   directory: tensorrt_lift
@@ -14,7 +25,7 @@ network:
   wired_topology: dual_network.yaml
   max_clock_rtt_s: 0.01
   a:
-    robot_interface: enP8p1s0
+    robot_interface: eth0
     # host defaults to dual_network.yaml robot_ip; override only for a different onboard IP.
     host_pose_port: 55300
     pose_port: 55310

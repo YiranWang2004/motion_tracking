@@ -20,7 +20,9 @@ import numpy as np
 from dual_runtime.onboard_config import (
     load_yaml, load_onboard_config, channel_endpoints, resolve, sha256, load_artifacts, fingerprint,
 )
-from dual_runtime.onboard_network import LatestChannel, decode_pose
+from dual_runtime.onboard_network import LatestChannel, decode_pose, PoseUnavailable
+from dual_runtime.vive_recovery import ViveRecovery, recovery_settings
+from dual_runtime.local_scalebfm_standing import LocalScaleBFMStanding, CommandBlend
 from dual_runtime.onboard_policy import OnboardPolicy, OnboardStanding
 from dual_runtime.onboard_team import TeamState
 from dual_runtime.interactive_control import load_default_command
@@ -57,6 +59,7 @@ def main():
     control = shared_control_settings(raw)
     net = config["network"]
     safety = config["runtime"]
+    recovery_cfg = recovery_settings(config.get('vive_recovery'))
     for key, value in safety.items():
         if not np.isfinite(value) or value <= 0:
             raise ValueError(f"invalid runtime setting {key}")
@@ -84,7 +87,8 @@ def main():
                            dict(policy=raw, control=control, safety=safety, contract=contract,
                                 clock_rtt=net["max_clock_rtt_s"], actuation=args.actuate,
                                 transport=net["transport"],
-                                acceleration_backend=config.get("acceleration", {}).get("backend", "pytorch")))
+                                acceleration_backend=config.get("acceleration", {}).get("backend", "pytorch"),
+                                vive_recovery=recovery_cfg))
     affinity = config.get("cpu_affinity", [])
     if affinity:
         os.sched_setaffinity(0, set(affinity))
@@ -99,6 +103,9 @@ def main():
     )
     default = load_default_command(standing_dir)
     standing = OnboardStanding(policy, default)
+    recovery = ViveRecovery(args.robot, recovery_cfg) if recovery_cfg['enabled'] else None
+    local_standing = LocalScaleBFMStanding(policy, default, recovery_cfg)
+    command_blend = CommandBlend(recovery_cfg['command_blend_s'])
     acceleration = config.get("acceleration", {})
     accelerated_backend = None
     if acceleration.get("backend", "pytorch") == "tensorrt":
@@ -146,6 +153,13 @@ def main():
     slow_ticks = 0
     last_send = None
     last_report = 0.
+    recovery_mode = 'normal'
+    task_clock_origin = None
+    def team_status():
+        status = team.status(ready=ready, frame=frame)
+        if recovery is not None:
+            status['vive_recovery'] = recovery.status()
+        return status
     try:
         pose_channel = LatestChannel(*channel_endpoints(net, args.robot, "pose"),
             "pose", max_rtt_s=net["max_clock_rtt_s"])
@@ -167,7 +181,7 @@ def main():
         while args.duration is None or time.monotonic()-start < args.duration:
             tick_started = time.monotonic()
             step = None
-            peer_channel.publish(team.status(ready=ready, frame=frame))
+            peer_channel.publish(team_status())
             # A short bounded local poll; wireless reads never block this loop.
             state = robot.read(.001)
             if state is None:
@@ -175,11 +189,18 @@ def main():
             try:
                 if state is None or (time.monotonic_ns()-state.packet_arrival_ns)*1.e-9 > safety["local_state_timeout_s"]:
                     raise RuntimeError("local_bridge_state_stale")
-                payload, offset, uncertainty = pose_channel.read(safety["pose_timeout_s"])
-                snapshot = decode_pose(payload, calibration_id=calibration_id,
-                    offset=offset, uncertainty=uncertainty, max_age_s=safety["pose_timeout_s"])
-                latest_snapshot_seq = int(payload["snapshot_seq"])
                 peer, peer_offset, peer_uncertainty = peer_channel.read(safety["peer_timeout_s"])
+                candidate = None
+                if recovery is None or recovery.mode != 'fallback':
+                    try:
+                        payload, offset, uncertainty = pose_channel.read(safety["pose_timeout_s"])
+                        candidate = decode_pose(payload, calibration_id=calibration_id,
+                            offset=offset, uncertainty=uncertainty, max_age_s=safety["pose_timeout_s"])
+                        latest_snapshot_seq = int(payload["snapshot_seq"])
+                    except PoseUnavailable:
+                        if recovery is None or local_standing.saved_default is None or recovery.latest is None:
+                            raise
+                snapshot = candidate if candidate is not None else recovery.latest
             except RuntimeError as exc:
                 ready = False
                 if started_control or peer_seen or time.monotonic()-start > safety["startup_timeout_s"]:
@@ -198,6 +219,36 @@ def main():
                 continue
             peer_seen = True
             leader_now = time.time() + (peer_offset if args.robot == "b" else 0.)
+            if recovery is not None:
+                recovery.observe(candidate, time.monotonic(), leader_now,
+                                 armed=local_standing.saved_default is not None,
+                                 sample_seq=latest_snapshot_seq)
+                if local_standing.saved_default is not None:
+                    old_mode = recovery_mode
+                    recovery_mode = recovery.update(peer.get('vive_recovery'), leader_now, policy.frame)
+                    if recovery_mode != old_mode:
+                        print(f'robot={args.robot} vive_recovery={recovery_mode}', flush=True)
+                        if recovery_mode in {'grace','fallback'} and old_mode not in {'grace','fallback'}:
+                            hold_q = (policy.reference.frame(max(policy.start_frame, frame))[policy.index].joint_pos
+                                      if team.phase == 'executing' else default.target_pos)
+                            local_standing.hold(hold_q, robot.last_command.target_pos)
+                        if robot.last_command is not None:
+                            command_blend.reset(robot.last_command, leader_now)
+                        if recovery_mode == 'recovering':
+                            policy.histories[policy.index].reset()
+                            policy.previous_residual[policy.index].fill(0)
+                            standing.history.reset()
+                    if recovery_mode == 'fallback':
+                        local_standing.fallback(recovery.fallback_at)
+                    if recovery_mode == 'recovering' or recovery.resumed_at is not None:
+                        if recovery.frame < policy.start_frame or recovery.frame >= policy.reference.frames:
+                            raise RuntimeError('invalid_vive_recovery_reference_frame')
+                        policy.frame = recovery.frame
+                    if recovery.resumed_at is not None:
+                        task_clock_origin = recovery.resumed_at - (policy.frame-policy.start_frame)/50.
+                    snapshot = recovery.applied or recovery.latest
+                else:
+                    recovery.applied = snapshot
             ready = team.phase in {"zero", "standing", "finished"} or (
                 team.phase == "default" and elapsed_default >= default_ticks
             ) or (team.phase == "executing" and completed)
@@ -213,7 +264,10 @@ def main():
                 key = sys.stdin.readline().strip().lower()
                 if key in {"s", "b", "a", "x"}:
                     team.request(dict(s="start", b="standing", a="task", x="stop")[key])
-            transitioned = team.update(peer, leader_now, ready=ready, complete=completed)
+            suspended = recovery_mode != 'normal'
+            ready = ready and not suspended
+            transitioned = team.update(peer, leader_now, ready=ready, complete=completed,
+                                       suspended=suspended)
             if transitioned:
                 print(f"robot={args.robot} epoch={team.epoch} phase={team.phase}", flush=True)
                 started_control = True
@@ -222,14 +276,23 @@ def main():
                     robot.prepare(state)
                 elif team.phase in {"standing", "finished"}:
                     standing.reset(snapshot)
+                    local_standing.arm()
                 elif team.phase == "executing":
+                    task_clock_origin = team.started_at
                     pre = raw.get("preflight", {})
                     policy.initialize(snapshot, **{key: float(pre.get(key, value)) for key, value in {
                         "max_partner_position_error_m": .2, "max_object_position_error_m": .2,
                         "max_box_size_error_m": .03, "max_robot_orientation_error_rad": .35,
                         "max_object_orientation_error_rad": .35}.items()})
                     policy.reset_rollout()
-            if team.phase == "zero":
+            if recovery_mode != 'normal':
+                q = state.quat_wxyz
+                tilt = np.arccos(np.clip(1-2*(q[1]**2+q[2]**2), -1, 1))
+                if tilt > control['max_tilt_rad']:
+                    raise RuntimeError('local_standing_tilt_limit')
+            if recovery_mode in {'grace', 'fallback'}:
+                desired = local_standing.compute(state, leader_now)
+            elif team.phase == "zero":
                 zero = np.zeros(29, dtype=np.float32)
                 desired = PDCommand(zero, zero, zero)
             elif team.phase == "default":
@@ -243,27 +306,32 @@ def main():
                     raise RuntimeError("standing_tilt_limit")
                 desired = standing.compute(state, snapshot)
             else:
-                if peer["phase"] == "executing" and frame >= 0 and int(peer["frame"]) >= 0:
+                peer_recovered = recovery is None or peer['vive_recovery']['mode'] == 'normal'
+                if recovery_mode == 'normal' and peer_recovered and peer["phase"] == "executing" and frame >= 0 and int(peer["frame"]) >= 0:
                     if abs(frame-int(peer["frame"])) > safety["max_frame_skew"]:
                         raise RuntimeError("peer_reference_frame_skew")
                 if not completed:
-                    expected = policy.start_frame + int(max(0, leader_now-team.started_at)*50)
-                    if abs(policy.frame-expected) > safety["max_frame_skew"]:
+                    expected = policy.start_frame + int(max(0, leader_now-task_clock_origin)*50)
+                    if recovery_mode == 'normal' and abs(policy.frame-expected) > safety["max_frame_skew"]:
                         raise RuntimeError("local_reference_deadline_missed")
-                    step = policy.compute_single(state, snapshot)
-                    frame, completed = step.frame, step.complete
+                    step = policy.compute_single(state, snapshot, advance=recovery_mode == 'normal',
+                        residual_gain=1. if recovery is None else recovery.blend(leader_now))
+                    frame = step.frame
+                    completed = step.complete and recovery_mode == 'normal'
                     desired = PDCommand(step.target, policy.kp, policy.kd)
                 else:
                     desired = standing.compute(state, snapshot)
                 reference = policy.reference.frame(frame)[0].object_pos_w
                 delta = snapshot.object.position_w - (reference if previous_reference is None else previous_reference)
-                if abs(delta[2]) > control["task_safety"]["object_position_z_error_m"] or np.linalg.norm(delta) > control["task_safety"]["object_position_xyz_error_m"]:
+                if recovery_mode == 'normal' and (abs(delta[2]) > control["task_safety"]["object_position_z_error_m"] or np.linalg.norm(delta) > control["task_safety"]["object_position_xyz_error_m"]):
                     raise RuntimeError("object_reference_error")
                 previous_reference = reference.copy()
                 if step is not None and step.complete:
                     standing.reset(snapshot)
             phase_key = {"default": "default_pose", "standing": "scalebfm_standing", "finished": "scalebfm_standing"}.get(team.phase, "executing")
             robot.limiter.max_target_delta = control["phase_target_delta"][phase_key]
+            if recovery is not None:
+                desired = command_blend.apply(desired, leader_now)
             processing = time.monotonic()-tick_started
             slow_ticks = slow_ticks+1 if processing > safety["max_processing_s"] else 0
             if slow_ticks >= safety["max_slow_ticks"]:
@@ -273,22 +341,34 @@ def main():
             if last_send is not None and time.monotonic()-last_send > safety["max_command_gap_s"]:
                 raise RuntimeError("onboard_command_gap")
             command = robot.send_pd(desired, state, enable=int(args.actuate and team.phase != "zero"))
+            if recovery is not None:
+                local_standing.executed(command.target_pos)
+                standing.action = local_standing.action.copy()
+                policy.previous_executed_action[policy.index] = (
+                    command.target_pos-policy.default_q)/policy.scalebfm.action_scale
             last_send = time.monotonic()
             ready = team.phase in {"zero", "standing", "finished"} or (team.phase == "default" and elapsed_default >= default_ticks) or (team.phase == "executing" and completed)
-            peer_channel.publish(team.status(ready=ready, frame=frame))
+            ready = ready and recovery_mode == 'normal'
+            peer_channel.publish(team_status())
             rows.append(dict(time_ns=time.monotonic_ns(), wall_time_ns=time.time_ns(),
                 phase=team.phase, epoch=team.epoch, phase_started_at=team.started_at,
                 frame=frame, pose_seq=latest_snapshot_seq, state_arrival_ns=state.packet_arrival_ns,
                 q=state.q_lab.copy(), dq=state.dq_lab.copy(), target=command.target_pos.copy(),
                 kp=command.kp.copy(), kd=command.kd.copy(), imu_quat_wxyz=state.quat_wxyz.copy(),
                 gyro=state.gyro.copy(),
-                poses=np.asarray(payload["poses"], dtype=np.float32),
+                poses=np.asarray([[*p.position_w, *p.quaternion_xyzw]
+                                  for p in (snapshot.robot_a, snapshot.robot_b, snapshot.object)], dtype=np.float32),
                 enable=robot.last_enable, processing_s=processing, peer_frame=int(peer["frame"]),
                 peer_clock_offset_s=peer_offset, peer_clock_uncertainty_s=peer_uncertainty,
+                recovery_mode=recovery_mode,
+                recovery_blend=1. if recovery is None else recovery.blend(leader_now),
+                pose_age_s=max(0., time.monotonic()-snapshot.robot_a.stamp_s),
+                recovery_reference_q=(np.full(29, np.nan) if local_standing.reference_q is None
+                                      else local_standing.reference_q.copy()),
                 observation=np.full(201, np.nan) if step is None else step.observation,
                 residual=np.full(29, np.nan) if step is None else step.residual))
             if time.monotonic()-last_report > 2:
-                print(f"robot={args.robot} phase={team.phase} frame={frame} processing_ms={processing*1000:.2f}", flush=True)
+                print(f"robot={args.robot} phase={team.phase} recovery={recovery_mode} frame={frame} processing_ms={processing*1000:.2f}", flush=True)
                 last_report = time.monotonic()
             deadline += .02
             delay = deadline-time.monotonic()
@@ -305,7 +385,8 @@ def main():
         if peer_channel is not None:
             for _ in range(3):
                 try:
-                    peer_channel.publish(team.status(ready=False, frame=frame))
+                    ready = False
+                    peer_channel.publish(team_status())
                 except OSError:
                     break
         try:
@@ -327,6 +408,8 @@ def main():
                 run_id=None if peer_channel is None else (
                     peer_channel.stream if args.robot == "a" else peer_channel.remote_stream),
                 pose_stream=None if pose_channel is None else pose_channel.remote_stream,
+                vive_recovery=recovery_cfg, final_recovery_mode=recovery_mode,
+                recovery_reject_reason='' if recovery is None else recovery.reject_reason,
                 actuation=args.actuate, ticks=len(rows)), indent=2))
             print(f"saved onboard log: {directory}", flush=True)
 
